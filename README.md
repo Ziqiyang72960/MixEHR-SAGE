@@ -32,15 +32,15 @@ For these datasets, we organize each data type of EHRs into one single input fil
  
 In the path "MixEHR_SAGE/data/", we have extracted a toy data from UKB database including ICD, ATC medication code, OPCS-4 procedure code three modalities.
 
-- icd_toy_data.csv has 4 columns rows: patient ID, ICD code, PheCode
+- icd_toy_data.csv has 3 columns rows: patient ID, ICD code, PheCode
 
                             Headers:SUBJECT_ID,ICD10,PheCode
 
-- atc_toy_data.csv has 3 columns rows: patient ID, drug code
+- atc_toy_data.csv has 2 columns rows: patient ID, drug code
 
                             Headers:SUBJECT_ID,ATC_CODE
 			    
-- opcs_toy_data.csv has 3 columns rows: patient ID, OPCS-4 procedure code
+- opcs_toy_data.csv has 2 columns rows: patient ID, OPCS-4 procedure code
 
                             Headers:SUBJECT_ID,OPCS4_CODE
   
