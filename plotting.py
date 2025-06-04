@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import leaves_list
 #from adjustText import adjust_text
 import torch
-
+import logging
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 exp_n = torch.load("results/toy_exp_n_icd_4.pt", map_location=device)
 exp_n = exp_n.cpu().detach().numpy()
@@ -34,10 +35,10 @@ icd_mapping.columns.name = None
 icd_mapping['Code_nodot'] = icd_mapping['Code'].str.replace('.', '')
 # Second mapping (from TSV file)
 second_icd_mapping = pd.read_csv("mapping/icd10_definition_coding19.tsv", delimiter='\t')
-second_icd_mapping['coding'] = second_icd_mapping['coding'].str.replace(".", "")  # Remove dots in codes
+#second_icd_mapping['coding'] = second_icd_mapping['coding'].str.replace(".", "")  # Remove dots in codes
 
 # Create dictionaries for both mappings
-icd_meaning_dict_first = dict(zip(icd_mapping['Code_nodot'], icd_mapping['ICD Title']))
+icd_meaning_dict_first = dict(zip(icd_mapping['Code'], icd_mapping['ICD Title']))
 icd_meaning_dict_second = dict(zip(second_icd_mapping['coding'], second_icd_mapping['meaning']))
 
 # Inverse mapping for phecode and ICD vocab
@@ -52,10 +53,10 @@ def map_icd_code(icd_code):
     if icd_code in icd_meaning_dict_first:
         return icd_meaning_dict_first[icd_code], True  # True indicates first mapping
     # If not found, try the second mapping
-    elif icd_code in icd_meaning_dict_second:
-        return icd_meaning_dict_second[icd_code], False  # False indicates second mapping
+    elif icd_code.replace('.', '') in icd_meaning_dict_second:
+        return icd_meaning_dict_second[icd_code.replace('.', '')], False  # False indicates second mapping
     else:
-        return "Unknown ICD", False  # Return a default value if not found in both mappings
+        return icd_code, False  # Return a default value if not found in both mappings
 
 # Apply the mapping to each ICD code, avoiding duplication in the row names
 pheno_meaning_dict = dict(zip(pheno_meaning['phecode'], pheno_meaning['phenotype']))
@@ -69,7 +70,7 @@ for i in range(V):
     
     if is_first_mapping:
         # For the first mapping, always add the ICD code with the meaning
-        icd_code_r = icd_mapping[icd_mapping['Code_nodot'] == icd_code]['Code'].iloc[0]
+        icd_code_r = icd_mapping[icd_mapping['Code'] == icd_code]['Code'].iloc[0]
         icd_meaning_list.append(f"{icd_code_r} {mapped_meaning}")
     else:
         icd_meaning_list.append(f"{mapped_meaning}")
@@ -83,9 +84,7 @@ for i in range(K):
 df_full.columns = pheno_meaning_list
 df_full.index = icd_meaning_list
 
-disease_order = [495.0, 496.0, 411.4, 562.1, 290.1, 272.11]
-diabetes = [250.1, 250.2, 250.7]
-leukemia = [204.0, 204.1, 204.2]
+disease_order = [250.2, 411.4, 562.1, 290.1, 272.11]
 phecode_index = []
 for i in disease_order:
     phecode_index.append(phecode_ids[i])
@@ -126,12 +125,6 @@ icd10_chapter_map = {
 # ----------------------------------------------------------------------------
 phenotypes_df = df_full.iloc[:, phecode_index]
 
-# Find the top 5 genes for each phenotype and collect their indices.
-#top_genes_indices = set()
-#for col in phenotypes_df.columns:
-#    top_genes = phenotypes_df[col].nlargest(3).index
-#    top_genes_indices.update(top_genes)
-
     
 top_genes_indices = []
 for col in phenotypes_df.columns:
@@ -143,52 +136,18 @@ for col in phenotypes_df.columns:
     top_genes = phenotypes_df[col].nlargest(3)
     sorted_top_genes_dfs.append(top_genes)
 
-# Concatenate the top genes DataFrames into one, with a proper order for the heatmap.
-top_genes_concat = pd.concat(sorted_top_genes_dfs, axis=1)
-top_genes_concat.sort_index(axis=1, level=0, ascending=False, inplace=True)
-
-# Now we have a multi-index where the first level is the phenotype and the second level is the SNP.
-#heatmap_indices = top_genes_concat.index
 heatmap_df = phenotypes_df.loc[top_genes_indices]
-
-
-agg_dict = {}
-# iterate only over your selected base phecode columns
-base_cols = df_full.columns[phecode_index]
-for col in base_cols:
-    prefix = col.split()[0]   # e.g. "250.2"
-    # find all child phecode columns in df_full
-    children = [c for c in df_full.columns
-                if c.split()[0] == prefix or c.split()[0].startswith(prefix)]
-    # compute weights by number of ICD seeds per child
-    child_pids = [phecode_ids[float(c.split()[0])] for c in children]
-    weights = np.array([len(token[pid]) for pid in child_pids], dtype=float)
-    weights /= weights.sum()
-
-    # weighted mean across the child columns
-    # df_full[children] is shape (n_icd, len(child_pids))
-    scaled = df_full[children].values * weights  # still (n_icd, n_children)
-    # …then sum over the columns to collapse to (n_icd,)
-    agg_values = scaled.sum(axis=1)
-    # store as a new aggregated series
-    agg_dict[col] = pd.Series(agg_values, index=df_full.index)
-
-# build the aggregated DataFrame
-agg_df = pd.DataFrame(agg_dict)
 
 # ----------------------------------------------------------------------------
 # 2) EXTRACT TOP‑3 ICD ROWS PER AGGREGATED PHECODE (preserving duplicates)
 # ----------------------------------------------------------------------------
 top_rows = []
 tuples = []
-for col in agg_df.columns:
-    top3 = agg_df[col].nlargest(3).index.tolist()
+for col in heatmap_df.columns:
+    top3 = heatmap_df[col].nlargest(3).index.tolist()
     top_rows.extend(top3)
     for icd in top3:
         tuples.append((col.split()[0], icd.split()[0]))
-
-heatmap_df = agg_df.loc[top_rows].drop_duplicates()
-
 #heatmap_df = phenotypes_df.loc[heatmap_indices,]
 # 2) Pick a color palette for all chapters
 chapters = sorted(set(icd10_chapter_map.values()))
@@ -214,12 +173,12 @@ row_colors = pd.Series(
       for lbl in heatmap_df.index ],
     index=heatmap_df.index
 )
-sns.set_context("notebook", font_scale=1.4) 
+sns.set_context("notebook", font_scale=1) 
 # 5) Draw your clustermap with that side-bar
 cg = sns.clustermap(
     heatmap_df,
     cmap="BuPu",
-    figsize=(4, 7), 
+    figsize=(4, 9), 
     linewidths=1, linecolor='white',
     row_cluster=False, col_cluster=False,
     row_colors=row_colors,                # ← this adds the left color bar
@@ -248,7 +207,6 @@ new_x0 = hm_pos.x0 - rc_width - 0.001  # subtract a tiny gap if you like
 # set rc_ax to that position
 rc_ax.set_position([new_x0, rc_pos.y0, rc_width, rc_height])
 rc_ax.xaxis.set_ticks_position('none')
-# 6) (Optional) Legend for the chapter colors
 from matplotlib.patches import Patch
 
 # 1) Compute which chapters actually appear in your rows
@@ -268,13 +226,13 @@ cg.ax_col_dendrogram.legend(
     handles=handles,
     title="ICD-10 Chapter",
     bbox_to_anchor=(1.02, 1),
-    loc='upper right',
+    loc='right',
     frameon=False
 )
 cax = cg.cax
 max_val = heatmap_df.values.max()
 cax.set_xticks([0, max_val])
-cax.set_xticklabels(['0', f'{max_val:.2f}'])
+cax.set_xticklabels(['0', f'{max_val:.4f}'])
 cax.xaxis.set_ticks_position('none')
 handles = [Patch(facecolor=chapter_to_color[ch], label=ch)
            for ch in used_chapters]
@@ -283,7 +241,7 @@ leg = cg.ax_col_dendrogram.legend(
     title = 'ICD10 Categories',
     bbox_to_anchor=(1.02, 1),
     loc='lower left',
-    frameon=True              # turn the box on
+    frameon=True             
 )
 ax = cg.ax_heatmap
 
@@ -312,19 +270,9 @@ for k, vals in token.items():
     for v in vals:
         inv_token.setdefault(v, k)
 for phecode_str, icd_str in tuples:
-#     if not has_more_than_one_decimal(float(phecode_str)):
-#         pid = phecode_ids[float(phecode_str)] # phecode ids index
-#         # convert icd_str back to your integer index:
-#         icd_idx = icd_name[icd_str.split()[0].replace('.', '')]
-#         pid_child = inv_phecode_ids.get(inv_token.get(icd_idx, -1),-1) # child phecode index
-#         pid_child_round = math.floor(pid_child * 10) / 10
-#         pid = math.floor(pid * 10) / 10
-#         pid_child_round = phecode_ids.get(pid_child_round, -1)
-#         label_match.append(pid == pid_child_round)
-#     else:
     pid = phecode_ids[float(phecode_str)] # phecode ids index
     # convert icd_str back to your integer index:
-    icd_idx = icd_name[icd_str.split()[0].replace('.', '')]
+    icd_idx = icd_name[icd_str]
     label_match.append(icd_idx in token[pid])
 # Now iterate your y‑ticklabels and add “*” when label_match is False
 print(label_match)
@@ -369,11 +317,8 @@ phi_r_med = phi_r_med / phi_r_med.sum(axis=0, keepdims=1) # normalization over V
 #phi_r_exp = np.exp(phi_r)
 #phi_r_softmax = phi_r_exp / phi_r_exp.sum(axis=0, keepdims=1)
 inv_phecode_ids = {v: k for k, v in phecode_ids.items()}
-med_ids = pkl.load(open("/mapping/med_vocab_ids.pkl", "rb"))
+med_ids = pkl.load(open("mapping/med_vocab_ids.pkl", "rb"))
 inv_med_ids = {v: k for k, v in med_ids.items()}
-med_mapping = pd.read_csv("atc_mapping.csv")
-pheno_meaning_dict = dict(zip(pheno_meaning['phecode'], pheno_meaning['phenotype']))
-med_meaning_dict = dict(zip(med_mapping['Medication ATC code'], med_mapping['Drug name']))
 #filtered_phecode_list = [phecode for phecode in pheno_meaning_dict.keys() if phecode in phecode_ids.keys()]
 #filtered_phecode_list_phecode_index_list = [phecode_ids[phecode] for phecode in filtered_phecode_list]
 df_full_med = pd.DataFrame(phi_r_med)
@@ -382,16 +327,12 @@ med_meaning_list = []
 for i in range(K):
     pheno_meaning_list.append(str(inv_phecode_ids[i]) + ' ' + pheno_meaning_dict[inv_phecode_ids[i]])
 for i in range(V):
-    med_meaning_list.append(str(inv_med_ids[i]) + ' ' + med_meaning_dict[inv_med_ids[i]])
+    med_meaning_list.append(str(inv_med_ids[i]) )
     # pheno_meaning_list.append(pheno_meaning_dict[inv_phecode_ids[i]])
 df_full_med.columns = pheno_meaning_list
 df_full_med.index = med_meaning_list
 #df_complete = df_full
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 
@@ -402,47 +343,20 @@ for col in phenotypes_df.columns:
     top3 = phenotypes_df[col].nlargest(3).index.tolist()
     top_genes_indices.extend(top3)
 
-# Now we have a multi-index where the first level is the phenotype and the second level is the SNP.
-#heatmap_indices = top_genes_concat.index
 heatmap_df = phenotypes_df.loc[top_genes_indices]
 
-
-agg_dict = {}
-# iterate only over your selected base phecode columns
-base_cols = df_full_med.columns[phecode_index]
-for col in base_cols:
-    prefix = col.split()[0]   # e.g. "250.2"
-    # find all child phecode columns in df_full
-    children = [c for c in df_full_med.columns
-                if c.split()[0] == prefix or c.split()[0].startswith(prefix)]
-    # compute weights by number of ICD seeds per child
-    child_pids = [phecode_ids[float(c.split()[0])] for c in children]
-    weights = np.array([len(token[pid]) for pid in child_pids], dtype=float)
-    weights /= weights.sum()
-
-    # weighted mean across the child columns
-    # df_full[children] is shape (n_icd, len(child_pids))
-    scaled = df_full_med[children].values * weights  # still (n_icd, n_children)
-    # …then sum over the columns to collapse to (n_icd,)
-    agg_values = scaled.sum(axis=1)
-    # store as a new aggregated series
-    agg_dict[col] = pd.Series(agg_values, index=df_full_med.index)
-
-# build the aggregated DataFrame
-agg_df = pd.DataFrame(agg_dict)
-
 # ----------------------------------------------------------------------------
-# 2) EXTRACT TOP‑3 ICD ROWS PER AGGREGATED PHECODE (preserving duplicates)
+# 2) TOP‑3 ATC Medication rows per phecode
 # ----------------------------------------------------------------------------
 top_rows = []
 tuples = []
-for col in agg_df.columns:
-    top3 = agg_df[col].nlargest(3).index.tolist()
+for col in heatmap_df.columns:
+    top3 = heatmap_df[col].nlargest(3).index.tolist()
     top_rows.extend(top3)
     for icd in top3:
         tuples.append((col.split()[0], icd.split()[0]))
 
-heatmap_df = agg_df.loc[top_rows].drop_duplicates()
+heatmap_df = heatmap_df.loc[top_rows].drop_duplicates()
 
 # 1) Your ICD-10 chapter map by first letter
 atc_first_level_map = {
@@ -487,12 +401,12 @@ row_colors = pd.Series(
       for lbl in heatmap_df.index ],
     index=heatmap_df.index
 )
-sns.set_context("notebook", font_scale=1.4) 
+sns.set_context("notebook", font_scale=1) 
 # 5) Draw your clustermap with that side-bar
 cg = sns.clustermap(
     heatmap_df,
     cmap="BuPu",
-    figsize=(6, 8), 
+    figsize=(6, 9), 
     linewidths=1, linecolor='white',
     row_cluster=False, col_cluster=False,
     row_colors=row_colors,                # ← this adds the left color bar
@@ -583,31 +497,21 @@ phi_r_opcs = phi_r_opcs / phi_r_opcs.sum(axis=0, keepdims=1) # normalization ove
 #phi_r_exp = np.exp(phi_r)
 #phi_r_softmax = phi_r_exp / phi_r_exp.sum(axis=0, keepdims=1)
 inv_phecode_ids = {v: k for k, v in phecode_ids.items()}
-opcs_ids = pkl.load(open("/mapping/opcs_vocab_ids.pkl", "rb"))
+opcs_ids = pkl.load(open("mapping/opcs_vocab_ids.pkl", "rb"))
 inv_opcs_ids = {v: k for k, v in opcs_ids.items()}
 opcs_meaning = pd.read_csv("opcs_definition.tsv", delimiter = '\t')
 
 pheno_meaning_dict = dict(zip(pheno_meaning['phecode'], pheno_meaning['phenotype']))
-opcs_meaning_dict = dict(zip(opcs_meaning['coding'], opcs_meaning['meaning']))
-#filtered_phecode_list = [phecode for phecode in pheno_meaning_dict.keys() if phecode in phecode_ids.keys()]
-#filtered_phecode_list_phecode_index_list = [phecode_ids[phecode] for phecode in filtered_phecode_list]
 df_full_opcs = pd.DataFrame(phi_r_opcs)
 pheno_meaning_list = []
 opcs_meaning_list = []
 for i in range(K):
     pheno_meaning_list.append(str(inv_phecode_ids[i]) + ' ' + pheno_meaning_dict[inv_phecode_ids[i]])
 for i in range(V):
-    opcs_meaning_list.append(opcs_meaning_dict[inv_opcs_ids[i]])
+    opcs_meaning_list.append(inv_opcs_ids[i])
     # pheno_meaning_list.append(pheno_meaning_dict[inv_phecode_ids[i]])
 df_full_opcs.columns = pheno_meaning_list
 df_full_opcs.index = opcs_meaning_list
-
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.colors import Normalize
-from matplotlib.cm import ScalarMappable
 
 phenotypes_df = df_full_opcs.iloc[:, phecode_index]
 
@@ -618,10 +522,6 @@ for col in phenotypes_df.columns:
     top_genes_indices.extend(top_genes)
 
 heatmap_df = phenotypes_df.loc[top_genes_indices,].drop_duplicates()
-
-import seaborn as sns
-import matplotlib.pyplot as plt
-import pandas as pd
 
 # 1) Your ICD-10 chapter map by first letter
 opcs4_chapter_map = {
@@ -679,12 +579,12 @@ row_colors = pd.Series(
       for lbl in heatmap_df.index ],
     index=heatmap_df.index
 )
-sns.set_context("notebook", font_scale=1.4) 
+sns.set_context("notebook", font_scale=1) 
 # 5) Draw your clustermap with that side-bar
 cg = sns.clustermap(
     heatmap_df,
     cmap="BuPu",
-    figsize=(4, 6), 
+    figsize=(4, 9), 
     linewidths=1, linecolor='white',
     row_cluster=False, col_cluster=False,
     row_colors=row_colors,                # ← this adds the left color bar
