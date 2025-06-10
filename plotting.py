@@ -4,6 +4,7 @@ import numpy as np
 import csv
 import seaborn as sns
 import math
+import argparse
 #import plotly.figure_factory as ff
 from scipy.cluster.hierarchy import linkage, dendrogram
 import matplotlib.pyplot as plt
@@ -84,10 +85,17 @@ for i in range(K):
 df_full.columns = pheno_meaning_list
 df_full.index = icd_meaning_list
 
-disease_order = [250.2, 411.4, 562.1, 290.1, 272.11]
-phecode_index = []
-for i in disease_order:
-    phecode_index.append(phecode_ids[i])
+parser = argparse.ArgumentParser(description="Plotting script with customizable disease order")
+parser.add_argument(
+    "--disease_order", 
+    type=str, 
+    help="Comma-separated list of phecodes (e.g., 250.2,411.4,562.1)", 
+    default="250.2,411.4,562.1,290.1,272.11"
+)
+args = parser.parse_args()
+
+# Convert string input to list of floats
+disease_order = [float(x.strip()) for x in args.disease_order.split(',')]
 
 
 # 1) Your ICD-10 chapter map by first letter
