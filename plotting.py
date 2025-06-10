@@ -97,6 +97,9 @@ args = parser.parse_args()
 # Convert string input to list of floats
 disease_order = [float(x.strip()) for x in args.disease_order.split(',')]
 
+phecode_index = []
+for i in disease_order:
+    phecode_index.append(phecode_ids[i])
 
 # 1) Your ICD-10 chapter map by first letter
 icd10_chapter_map = {
