@@ -104,7 +104,7 @@ class Corpus(Dataset):
         C_list = [] # the number of records in the corpus for each modality
         for m, modality_name in enumerate(modaltiy_list):
             data = pd.read_csv(path_dict[modality_name])
-            print(data)
+            #print(data)
             data_list.append(data)
             # C_list.append(data.FREQ.to_numpy().sum())
             C_list.append(data.shape[0]) # number of words of a modality
@@ -123,7 +123,7 @@ class Corpus(Dataset):
                 #data = data.drop('Phenotype', axis=1)
                 phecode_ids, icd_vocab_ids, tokenized_phecode_icd = tokenize_phecode_icd_corpus(data)
                 vocab_list.append(icd_vocab_ids)
-                print(tokenized_phecode_icd)
+                #print(tokenized_phecode_icd)
                 with open('mapping/icd_vocab_ids.pkl', 'wb') as handle:
                     pickle.dump(icd_vocab_ids, handle)
                 with open('mapping/phecode_ids.pkl', 'wb') as handle:
@@ -249,17 +249,17 @@ def run(args):
     cmd = args.cmd
     BASE_FOLDER = args.input
     STORE_FOLDER = args.output
-    print(BASE_FOLDER)
-    print(STORE_FOLDER)
+    #print(BASE_FOLDER)
+    #print(STORE_FOLDER)
     if cmd == 'process':
         metadata = pd.read_csv(os.path.join(BASE_FOLDER, 'ukbb_metadata.csv'), index_col='index')
-        print(metadata)
+        #print(metadata)
         modality_list = metadata.index.tolist()
         path_dict = metadata['path'].to_dict() # the data path for each modality
         column_dict = metadata['word_column'].to_dict() # the column of csv file is defined as word for each modality
-        print(modality_list)
-        print(path_dict)
-        print(column_dict)
+        #print(modality_list)
+        #print(path_dict)
+        #print(column_dict)
         Corpus.build_from_GDTM_fileformat(modality_list, path_dict, column_dict, STORE_FOLDER)
 
     elif cmd == 'split':
