@@ -18,11 +18,6 @@ The proababilistic graphical model of MixEHR-S is shown:
 <img src="https://github.com/li-lab-mcgill/MixEHR-Seed/blob/main/figures/PGM.jpg" width="920" height="350">
 
 
-# Relevant Publications
-
-This published code is referenced from: 
-
-
 
 # Dataset Preparation
 
