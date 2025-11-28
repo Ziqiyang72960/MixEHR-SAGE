@@ -84,19 +84,46 @@ For these datasets, we organize each data type of EHRs into one single input fil
  
 In the path "MixEHR_SAGE/data/", we have extracted a toy data from UKB database including ICD, ATC medication code, OPCS-4 procedure code three modalities.
 
+## Supported File Formats
+
+MixEHR-SAGE supports multiple input file formats:
+- **CSV** (.csv) - Comma-separated values
+- **TSV** (.tsv) - Tab-separated values
+- **JSON** (.json) - JSON format (records orientation)
+- **TXT** (.txt) - Text files (auto-detects tab or comma separator)
+
+Both the metadata file and data files can use any of these formats.
+
 ## Required Files
 
 Your data directory must contain:
 
-1. **ukbb_metadata.csv** - Metadata file defining your modalities:
+1. **ukbb_metadata** - Metadata file defining your modalities (supports .csv, .tsv, .json, .txt):
+   
+   **CSV format (ukbb_metadata.csv):**
    ```csv
    index,path,word_column
-   icd,./data/synthetic_icd.csv,code
-   med,./data/synthetic_med.csv,code
-   opcs,./data/synthetic_opcs.csv,code
+   icd,synthetic_icd.csv,code
+   med,synthetic_med.csv,code
+   opcs,synthetic_opcs.csv,code
    ```
 
-2. **Data files** for each modality referenced in the metadata:
+   **TSV format (ukbb_metadata.tsv):**
+   ```
+   index	path	word_column
+   icd	synthetic_icd.tsv	code
+   med	synthetic_med.tsv	code
+   ```
+
+   **JSON format (ukbb_metadata.json):**
+   ```json
+   [
+     {"index": "icd", "path": "synthetic_icd.json", "word_column": "code"},
+     {"index": "med", "path": "synthetic_med.json", "word_column": "code"}
+   ]
+   ```
+
+2. **Data files** for each modality referenced in the metadata (supports .csv, .tsv, .json, .txt):
 
    - **Guided modality (first row)** - Must have columns: SUBJECT_ID, code column, PheCode
      ```

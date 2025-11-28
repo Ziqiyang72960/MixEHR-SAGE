@@ -6,6 +6,7 @@ import os
 import logging
 import sys
 import time
+import json
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import argparse
@@ -13,6 +14,42 @@ from utils import tokenize_phecode_icd_corpus
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
+
+def read_data_file(file_path, **kwargs):
+    """
+    Read data file based on file extension.
+    Supports: CSV, TSV, JSON, TXT formats.
+    
+    Args:
+        file_path: Path to the data file
+        **kwargs: Additional arguments passed to pandas read functions
+    
+    Returns:
+        pandas DataFrame
+    """
+    _, ext = os.path.splitext(file_path.lower())
+    
+    if ext == '.csv':
+        return pd.read_csv(file_path, **kwargs)
+    elif ext == '.tsv':
+        return pd.read_csv(file_path, sep='\t', **kwargs)
+    elif ext == '.json':
+        return pd.read_json(file_path, **kwargs)
+    elif ext == '.txt':
+        # Try tab-separated first, then comma-separated
+        try:
+            df = pd.read_csv(file_path, sep='\t', **kwargs)
+            if len(df.columns) == 1:
+                # If only one column, try comma-separated
+                df = pd.read_csv(file_path, sep=',', **kwargs)
+            return df
+        except Exception:
+            return pd.read_csv(file_path, sep=',', **kwargs)
+    else:
+        # Default to CSV for unknown extensions
+        logger.warning(f"Unknown file extension '{ext}', treating as CSV")
+        return pd.read_csv(file_path, **kwargs)
 
 parser = argparse.ArgumentParser()
 subparsers = parser.add_subparsers(help='Select one command', dest='cmd')
@@ -103,7 +140,7 @@ class Corpus(Dataset):
         data_list = [] # the dataframe for each modality
         C_list = [] # the number of records in the corpus for each modality
         for m, modality_name in enumerate(modaltiy_list):
-            data = pd.read_csv(path_dict[modality_name])
+            data = read_data_file(path_dict[modality_name])
             #print(data)
             data_list.append(data)
             # C_list.append(data.FREQ.to_numpy().sum())
@@ -245,6 +282,30 @@ class Corpus(Dataset):
             # return "Document id: (%s), Words %s, Count %s" % (self.doc_id, sum([len(words_dict) for words_dict in self.words_dict]), sum([Cd for Cd in self.Cd]))
             return "Document id: (%s), Words %s, Count %s" % (self.doc_id, [len(words_dict) for words_dict in self.words_dict], [Cd for Cd in self.Cd])
 
+def find_metadata_file(base_folder):
+    """
+    Find metadata file in the base folder.
+    Supports: ukbb_metadata.csv, ukbb_metadata.tsv, ukbb_metadata.json, ukbb_metadata.txt
+    
+    Args:
+        base_folder: Directory to search for metadata file
+    
+    Returns:
+        Path to metadata file
+    
+    Raises:
+        FileNotFoundError if no metadata file is found
+    """
+    for ext in ['.csv', '.tsv', '.json', '.txt']:
+        metadata_path = os.path.join(base_folder, f'ukbb_metadata{ext}')
+        if os.path.exists(metadata_path):
+            return metadata_path
+    raise FileNotFoundError(
+        f"No metadata file found in {base_folder}. "
+        "Expected one of: ukbb_metadata.csv, ukbb_metadata.tsv, ukbb_metadata.json, ukbb_metadata.txt"
+    )
+
+
 def run(args):
     cmd = args.cmd
     BASE_FOLDER = args.input
@@ -252,7 +313,10 @@ def run(args):
     #print(BASE_FOLDER)
     #print(STORE_FOLDER)
     if cmd == 'process':
-        metadata = pd.read_csv(os.path.join(BASE_FOLDER, 'ukbb_metadata.csv'), index_col='index')
+        # Find and read metadata file (supports csv, tsv, json, txt)
+        metadata_path = find_metadata_file(BASE_FOLDER)
+        metadata = read_data_file(metadata_path, index_col='index')
+        logger.info(f"Using metadata file: {metadata_path}")
         #print(metadata)
         modality_list = metadata.index.tolist()
         # Resolve paths relative to the data directory if they start with './'
