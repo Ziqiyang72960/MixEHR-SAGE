@@ -52,6 +52,82 @@ optional arguments:
   --skip-prior          Skip prior computation step (use existing priors)
 ```
 
+# Online Patient Inference
+
+After training, you can quickly infer topic mixtures (theta/patient risk) for new patients using the `infer_patient.py` script:
+
+```bash
+# Basic inference
+python infer_patient.py ./results/ ./new_patients.csv -o patient_theta.csv
+
+# With more iterations for better accuracy
+python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --iterations 20
+
+# Output only top-5 topics per patient
+python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --top-k 5
+```
+
+## Inference Options
+
+```
+usage: infer_patient.py [-h] [--output OUTPUT] [--corpus CORPUS] 
+                        [--seed-matrix SEED_MATRIX] [--mapping MAPPING]
+                        [--iterations ITERATIONS] [--top-k TOP_K]
+                        model_path patient_data
+
+positional arguments:
+  model_path            Path to trained model directory (results folder)
+  patient_data          Path to patient data file (CSV, TSV, JSON, TXT)
+
+optional arguments:
+  --output, -o          Output file for theta values (default: patient_theta.csv)
+  --corpus, -c          Path to corpus directory (default: ./store/)
+  --iterations, -i      Number of VI iterations (default: 10)
+  --top-k, -k           Output only top-k topics per patient
+```
+
+## Input Data Format
+
+The patient data file should contain:
+- `SUBJECT_ID`: patient identifier
+- `code` (or specified word column): medical codes
+
+Example CSV:
+```csv
+SUBJECT_ID,code
+patient1,E11.9
+patient1,I10
+patient2,E11.0
+```
+
+## Programmatic Inference
+
+You can also use the inference API directly in Python:
+
+```python
+from MixEHR_SAGE import MixEHR_SAGE
+from corpus import Corpus
+import torch
+
+# Load trained model
+corpus = Corpus.read_corpus_from_directory('./store/')
+seeds_matrix = torch.load('./phecode_mapping/seed_topic_matrix.pt')
+model = MixEHR_SAGE.load_trained_model(
+    './results/', corpus, seeds_matrix, corpus.modalities
+)
+
+# Infer theta for a single patient
+# patient_bow format: [{word_id: freq}, ...] one dict per modality
+patient_bow = [{0: 1, 5: 2}, {10: 1}]  # Example: modality 0 has words 0,5; modality 1 has word 10
+theta = model.infer_theta(patient_bow, num_iterations=10)
+print(f"Patient risk profile: {theta}")
+
+# Get top risk topics
+top_k = torch.topk(theta, k=5)
+print(f"Top 5 topics: {top_k.indices.tolist()}")
+print(f"Top 5 values: {top_k.values.tolist()}")
+```
+
 # Dynamic Modality Support
 
 MixEHR-SAGE now supports **any number of modalities** (1 or more). The modalities are dynamically read from your `ukbb_metadata.csv` file. The first modality listed is treated as the **guided modality** (typically ICD codes with PheCode mappings).

@@ -362,3 +362,166 @@ class MixEHR_SAGE(nn.Module):
         torch.save(self.exp_s, "results/toy_exp_s_%s.pt" % (epoch))
         torch.save(self.pi, "results/toy_pi_%s.pt" % (epoch))
 
+    def infer_theta(self, patient_bow, num_iterations=10):
+        """
+        Fast online inference for new patient's topic mixture (theta/risk).
+        Uses the learned phi (word-topic distributions) to infer theta for new patients.
+        
+        Args:
+            patient_bow: dict of {modality_index: {word_id: frequency}} for each modality
+                        or list of dicts, one per modality
+            num_iterations: number of variational inference iterations (default: 10)
+        
+        Returns:
+            theta: K-dimensional tensor representing patient's topic mixture (risk profile)
+        """
+        # Initialize theta uniformly
+        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
+        
+        # Convert patient_bow to list format if needed
+        if isinstance(patient_bow, dict) and 0 not in patient_bow:
+            # Single modality dict format
+            patient_bow = [patient_bow]
+        elif isinstance(patient_bow, dict):
+            # Convert {modality_idx: bow_dict} to list
+            patient_bow = [patient_bow.get(m, {}) for m in range(self.modaltiy_num)]
+        
+        # Variational inference iterations
+        for iteration in range(num_iterations):
+            # Accumulate expected counts
+            exp_m_new = torch.zeros(self.K, dtype=torch.double, device=device)
+            
+            for m in range(min(len(patient_bow), self.modaltiy_num)):
+                bow_m = patient_bow[m]
+                if not bow_m:
+                    continue
+                    
+                for word_id, freq in bow_m.items():
+                    if word_id >= self.V[m]:
+                        continue  # Skip unknown words
+                    
+                    if m == self.guided_modality:
+                        # For guided modality, use both seed and regular topics
+                        # Compute gamma for seed topic
+                        gamma_ss = self.seeds_topic_matrix[word_id] * (theta + self.eta) \
+                                   * (self.mu + self.exp_s[word_id]) / (self.mu_sum + self.exp_s_sum + mini_val) * self.pi
+                        # Compute gamma for regular topic from seed words
+                        gamma_sr = self.seeds_topic_matrix[word_id] * (theta + self.eta) \
+                                   * (self.beta + self.exp_n[m][word_id]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val) * (1 - self.pi)
+                        # Compute gamma for regular words
+                        gamma_rr = (1 - self.seeds_topic_matrix[word_id]) * (theta + self.eta) \
+                                   * (self.beta + self.exp_n[m][word_id]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                        
+                        gamma = gamma_ss + gamma_sr + gamma_rr
+                    else:
+                        # For unguided modality
+                        gamma = (theta + self.eta) * (self.beta + self.exp_n[m][word_id]) \
+                                / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                    
+                    # Normalize
+                    gamma = gamma / (gamma.sum() + mini_val)
+                    
+                    # Accumulate
+                    exp_m_new += gamma * freq
+            
+            # Update theta
+            theta = (exp_m_new + self.eta) / (exp_m_new.sum() + self.K * self.eta)
+        
+        return theta
+
+    def infer_theta_batch(self, patients_bow_list, num_iterations=10):
+        """
+        Batch inference for multiple new patients' topic mixtures (theta/risk).
+        
+        Args:
+            patients_bow_list: list of patient_bow dicts (see infer_theta for format)
+            num_iterations: number of variational inference iterations (default: 10)
+        
+        Returns:
+            thetas: (num_patients, K) tensor of topic mixtures
+        """
+        thetas = []
+        for patient_bow in patients_bow_list:
+            theta = self.infer_theta(patient_bow, num_iterations)
+            thetas.append(theta)
+        return torch.stack(thetas)
+
+    def get_theta(self):
+        """
+        Get the learned theta (topic mixture) for all training documents.
+        Theta is computed as normalized exp_m.
+        
+        Returns:
+            theta: (D, K) tensor where each row is a document's topic mixture
+        """
+        # Normalize exp_m to get theta
+        theta = (self.exp_m + self.eta) / (self.exp_m_sum.unsqueeze(1) + self.K * self.eta)
+        return theta
+
+    def get_phi(self, modality=0):
+        """
+        Get the learned phi (word-topic distribution) for a specific modality.
+        
+        Args:
+            modality: modality index (default: 0, the guided modality)
+        
+        Returns:
+            phi: (V, K) tensor where each column is a topic's word distribution
+        """
+        phi = (self.exp_n[modality] + self.beta) / (self.exp_n_sum[modality] + self.beta_sum[modality])
+        return phi
+
+    @staticmethod
+    def load_trained_model(model_path, corpus, seeds_topic_matrix, modality_list, 
+                           guided_modality=0, guide_prior_path='./guide_prior/'):
+        """
+        Load a trained model for inference.
+        
+        Args:
+            model_path: directory containing saved model parameters (exp_m, exp_n, exp_s, pi)
+            corpus: Corpus object (can be empty, just needs V and modalities info)
+            seeds_topic_matrix: seed topic matrix
+            modality_list: list of modality names
+            guided_modality: index of guided modality
+            guide_prior_path: path to guide prior directory
+        
+        Returns:
+            model: MixEHR_SAGE model loaded with trained parameters
+        """
+        # Create model instance
+        model = MixEHR_SAGE(corpus, seeds_topic_matrix, modality_list, 
+                           guided_modality=guided_modality, 
+                           guide_prior_path=guide_prior_path)
+        
+        # Load trained parameters
+        # Find the latest epoch
+        import glob
+        exp_m_files = glob.glob(os.path.join(model_path, "toy_exp_m_*.pt"))
+        if not exp_m_files:
+            raise FileNotFoundError(f"No trained model found in {model_path}")
+        
+        # Extract epoch numbers and find max
+        epochs = [int(f.split('_')[-1].replace('.pt', '')) for f in exp_m_files]
+        latest_epoch = max(epochs)
+        
+        # Load parameters
+        model.exp_m = torch.load(os.path.join(model_path, f"toy_exp_m_{latest_epoch}.pt"), 
+                                  map_location=device, weights_only=False)
+        model.exp_s = torch.load(os.path.join(model_path, f"toy_exp_s_{latest_epoch}.pt"), 
+                                  map_location=device, weights_only=False)
+        model.pi = torch.load(os.path.join(model_path, f"toy_pi_{latest_epoch}.pt"), 
+                               map_location=device, weights_only=False)
+        
+        for i, modality in enumerate(modality_list):
+            exp_n_path = os.path.join(model_path, f"toy_exp_n_{modality}_{latest_epoch}.pt")
+            if os.path.exists(exp_n_path):
+                model.exp_n[i] = torch.load(exp_n_path, map_location=device, weights_only=False)
+        
+        # Recompute sums
+        model.exp_n_sum = [torch.sum(exp_n, dim=0) for exp_n in model.exp_n]
+        model.exp_s_sum = torch.sum(model.exp_s, dim=0)
+        model.exp_m_sum = torch.sum(model.exp_m, dim=1)
+        
+        print(f"Loaded model from epoch {latest_epoch}")
+        return model
+
