@@ -255,7 +255,17 @@ def run(args):
         metadata = pd.read_csv(os.path.join(BASE_FOLDER, 'ukbb_metadata.csv'), index_col='index')
         #print(metadata)
         modality_list = metadata.index.tolist()
-        path_dict = metadata['path'].to_dict() # the data path for each modality
+        # Resolve paths relative to the data directory if they start with './'
+        path_dict = {}
+        for modality, path in metadata['path'].to_dict().items():
+            if path.startswith('./'):
+                # Make path relative to BASE_FOLDER if it starts with './'
+                path_dict[modality] = os.path.join(BASE_FOLDER, path[2:])
+            elif not os.path.isabs(path):
+                # Make other relative paths also relative to BASE_FOLDER
+                path_dict[modality] = os.path.join(BASE_FOLDER, path)
+            else:
+                path_dict[modality] = path
         column_dict = metadata['word_column'].to_dict() # the column of csv file is defined as word for each modality
         #print(modality_list)
         #print(path_dict)
@@ -268,6 +278,11 @@ def run(args):
         Corpus.split_train_test(c, testing_rate, STORE_FOLDER)
 
 if __name__ == '__main__':
-    run(parser.parse_args(['process', '-n', '150', './data/', './store/']))
+    import sys
+    # If command-line arguments provided, use them; otherwise use defaults for backward compatibility
+    if len(sys.argv) > 1:
+        run(parser.parse_args())
+    else:
+        run(parser.parse_args(['process', '-n', '150', './data/', './store/']))
     # run(parser.parse_args(['split', 'store/', 'store/']))
 
