@@ -15,13 +15,14 @@ mini_val = 1e-6
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class MixEHR_Seed(nn.Module):
-    def __init__(self, corpus, seeds_topic_matrix, modality_list, guided_modality=0, stochastic_VI=True, elbo_modality=0, batch_size=1000, out='./store/'):
+    def __init__(self, corpus, seeds_topic_matrix, modality_list, guided_modality=0, stochastic_VI=True, elbo_modality=0, batch_size=1000, out='./store/', guide_prior_path='./guide_prior/'):
         """
         Arguments:
             corpus: document class.
             seeds_topic_matrix: V x K matrix, each element represents the existence of seed word w for topic k.
             batch_size: batch size for a minibatch
             out: output path
+            guide_prior_path: path to guide_prior directory containing initialized tokens
         """
         super(MixEHR_Seed, self).__init__()
         self.modalities = modality_list # name of modalites
@@ -29,6 +30,7 @@ class MixEHR_Seed(nn.Module):
         self.guided_modality = guided_modality # the modality defined as the guided modality
         # self.elbo_modality = elbo_modality
         self.out = out  # folder to save experiments
+        self.guide_prior_path = guide_prior_path  # path to guide_prior directory
 
         self.stochastic_VI = stochastic_VI
         self.full_batch_generator = Corpus.generator_full_batch(corpus)
@@ -86,15 +88,33 @@ class MixEHR_Seed(nn.Module):
     def initialize_tokens(self):
         '''
         obtain initialized tokens E[n_wk], E[s_wk], E[m_dk]
+        dynamically loads tokens for all modalities based on self.modalities list
         '''
         print("Obtain initialized tokens")
-        # todo: read from the metedata instead of hard writing
-        # get exp_n for guided ICD modality and other modalities
-        self.exp_n[0] = torch.load("./guide_prior/init_exp_n_icd.pt", map_location=device)  # get exp_n for guided ICD modality, V X K matrix
-        self.exp_n[1] = torch.load("./guide_prior/init_exp_n_med.pt", map_location=device)  # get exp_n for unguided med modaltiy, V X K matrix
-        self.exp_n[2] = torch.load("./guide_prior/init_exp_n_opcs.pt", map_location=device)  # get exp_n for unguided opcs modaltiy, V X K matrix
-        self.exp_s = torch.load("./guide_prior/init_exp_s_icd.pt", map_location=device)
-        self.exp_m = torch.load("./guide_prior/init_exp_m.pt", map_location=device)  # get exp_m without respect to modality, D X K matrix
+        guided_modality_name = self.modalities[self.guided_modality]
+        
+        # Load exp_n for each modality dynamically
+        for m, modality_name in enumerate(self.modalities):
+            exp_n_path = os.path.join(self.guide_prior_path, f"init_exp_n_{modality_name}.pt")
+            if os.path.exists(exp_n_path):
+                self.exp_n[m] = torch.load(exp_n_path, map_location=device)
+            else:
+                print(f"Warning: {exp_n_path} not found, using zeros for modality {modality_name}")
+        
+        # Load exp_s for guided modality
+        exp_s_path = os.path.join(self.guide_prior_path, f"init_exp_s_{guided_modality_name}.pt")
+        if os.path.exists(exp_s_path):
+            self.exp_s = torch.load(exp_s_path, map_location=device)
+        else:
+            print(f"Warning: {exp_s_path} not found, using zeros for exp_s")
+        
+        # Load exp_m (document-topic matrix, not modality-specific)
+        exp_m_path = os.path.join(self.guide_prior_path, "init_exp_m.pt")
+        if os.path.exists(exp_m_path):
+            self.exp_m = torch.load(exp_m_path, map_location=device)
+        else:
+            print(f"Warning: {exp_m_path} not found, using zeros for exp_m")
+        
         self.exp_n_sum = [torch.sum(exp_n, dim=0) for exp_n in self.exp_n] # sum over w, exp_n is [V K] dimensionality, exp_n_sum is K-len vector for each modality
         self.exp_s_sum = torch.sum(self.exp_s, dim=0) # sum over w, exp_p is [V K] dimensionality, exp_s_sum is K-len vector
         self.exp_m_sum = torch.sum(self.exp_m, dim=1) # sum over k, exp_m is [D K] dimensionality, exp_m_sum is D-len vector

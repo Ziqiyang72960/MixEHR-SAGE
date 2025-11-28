@@ -18,6 +18,63 @@ The proababilistic graphical model of MixEHR-S is shown:
 <img src="https://github.com/li-lab-mcgill/MixEHR-Seed/blob/main/figures/PGM.jpg" width="920" height="350">
 
 
+# Quick Start (Command Line)
+
+The simplest way to run MixEHR-SAGE is using the command-line interface:
+
+```bash
+# Run with your EHR data directory
+python run_MixEHR.py ./data/
+
+# Run with custom settings
+python run_MixEHR.py ./data/ --output ./results/ --epochs 10 --batch-size 500
+```
+
+## Command Line Options
+
+```
+usage: run_MixEHR.py [-h] [--output OUTPUT] [--store STORE] [--epochs EPOCHS]
+                     [--batch-size BATCH_SIZE] [--max-docs MAX_DOCS]
+                     [--skip-corpus] [--skip-prior]
+                     data_path
+
+positional arguments:
+  data_path             Path to the directory containing EHR data and ukbb_metadata.csv
+
+optional arguments:
+  -h, --help            show help message and exit
+  --output, -o          Directory to store model outputs (default: ./results/)
+  --store, -s           Directory to store processed corpus (default: ./store/)
+  --epochs, -e          Maximum number of training epochs (default: 5)
+  --batch-size, -b      Batch size for training (default: 1000)
+  --max-docs, -n        Maximum number of documents to process (default: all)
+  --skip-corpus         Skip corpus processing step (use existing corpus)
+  --skip-prior          Skip prior computation step (use existing priors)
+```
+
+# Dynamic Modality Support
+
+MixEHR-SAGE now supports **any number of modalities** (1 or more). The modalities are dynamically read from your `ukbb_metadata.csv` file. The first modality listed is treated as the **guided modality** (typically ICD codes with PheCode mappings).
+
+## Adding or Removing Modalities
+
+To use a different number of modalities, simply modify your `ukbb_metadata.csv` file:
+
+**Example with 2 modalities:**
+```csv
+index,path,word_column
+icd,./data/icd_data.csv,code
+med,./data/med_data.csv,code
+```
+
+**Example with 4 modalities:**
+```csv
+index,path,word_column
+icd,./data/icd_data.csv,code
+med,./data/med_data.csv,code
+opcs,./data/opcs_data.csv,code
+lab,./data/lab_data.csv,code
+```
 
 # Dataset Preparation
 
@@ -26,6 +83,32 @@ We evaluated MixEHR-SAGE on the extracted clinical dataset from UKB, and MIMIC-I
 For these datasets, we organize each data type of EHRs into one single input file (such as ICD codes). Moreover, the temporal information (such as a patient's age group) is listed in a separate file. 
  
 In the path "MixEHR_SAGE/data/", we have extracted a toy data from UKB database including ICD, ATC medication code, OPCS-4 procedure code three modalities.
+
+## Required Files
+
+Your data directory must contain:
+
+1. **ukbb_metadata.csv** - Metadata file defining your modalities:
+   ```csv
+   index,path,word_column
+   icd,./data/synthetic_icd.csv,code
+   med,./data/synthetic_med.csv,code
+   opcs,./data/synthetic_opcs.csv,code
+   ```
+
+2. **Data files** for each modality referenced in the metadata:
+
+   - **Guided modality (first row)** - Must have columns: SUBJECT_ID, code column, PheCode
+     ```
+     Headers: SUBJECT_ID,code,PheCode
+     ```
+
+   - **Other modalities** - Must have columns: SUBJECT_ID, code column
+     ```
+     Headers: SUBJECT_ID,code
+     ```
+
+## Example Data Format
 
 - icd_toy_data.csv has 3 columns rows: patient ID, ICD code, PheCode
 
@@ -40,7 +123,9 @@ In the path "MixEHR_SAGE/data/", we have extracted a toy data from UKB database 
                             Headers:SUBJECT_ID,OPCS4_CODE
   
               
-# Code Description
+# Code Description (Step-by-Step)
+
+If you prefer to run the pipeline step by step instead of using the CLI:
 
 ## STEP 1: Process Dataset and extract seeds
 
@@ -50,11 +135,17 @@ You can use `corpus.py` to transform the raw inputs into a runnable Corpus data 
 
 Place dataset to the specific path `./data/` and then run the following code:
 
-    run(parser.parse_args(['process', '-n', '150', './data/', './store/']))
+```bash
+python corpus.py process ./data/ ./store/
+# Or with max documents limit:
+python corpus.py process -n 150 ./data/ ./store/
+```
     
 you also need to split the dataset into train/validation/test subset. The data path and detailed split ratio could be edited:
-    
-    run(parser.parse_args(['split', 'store/test/', 'store/']))
+
+```bash
+python corpus.py split store/test/ store/
+```
 	
 The extracted PheCode-ICD mapping is located at path `./phecode_mapping/all_seed_topic_matrix.pt`, where each row and column represents a word and a topic, respectively.
 
@@ -69,10 +160,11 @@ Compute the initial sufficient statistics by running the file: `./guide_prior/ge
 
 ## STEP 3: Topic Modelling
 
-We can run `./main.py` to perform seed-guided topic modelling on the extracted train data. 
-The execution code is:
+We can run `./main.py` to perform seed-guided topic modelling on the extracted train data:
 
-    run(parser.parse_args(['./test_store/', './result/']))
+```bash
+python main.py ./store/ ./result/ -epoch 5 -batch_size 1000
+```
     
 The topic hyperparameters of regular topics and seed topics need to fine-tune by minimizing the held-out negative log-likelihood on the validation set. We then apply MixEHR-Seed with the estiated hyperparameters on the train set. 
  
