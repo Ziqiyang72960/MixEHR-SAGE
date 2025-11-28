@@ -1,10 +1,10 @@
 import logging
 import argparse
 import torch
-from MixEHR_Seed import MixEHR_Seed
+from MixEHR_SAGE import MixEHR_SAGE
 from corpus import Corpus
 
-logger = logging.getLogger("MixEHR-Seed training processing")
+logger = logging.getLogger("MixEHR-SAGE training processing")
 parser = argparse.ArgumentParser(description="Train MixEHR-SAGE model")
 # default arguments
 parser.add_argument('corpus', help='Path to read corpus file', default='./store/')
@@ -26,7 +26,7 @@ def run(args):
     corpus = Corpus.read_corpus_from_directory(args.corpus)
     print("trained modalities include", corpus.modalities)
     print(f"Number of modalities: {len(corpus.modalities)}")
-    model = MixEHR_Seed(corpus, seeds_topic_matrix, corpus.modalities, guided_modality=0, stochastic_VI=True, batch_size=args.batch_size, out=args.output, guide_prior_path=args.guide_prior_path)
+    model = MixEHR_SAGE(corpus, seeds_topic_matrix, corpus.modalities, guided_modality=0, stochastic_VI=True, batch_size=args.batch_size, out=args.output, guide_prior_path=args.guide_prior_path)
     model = model.to(device)
     logger.info('''
     #     ======= Parameters =======
