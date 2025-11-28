@@ -97,21 +97,21 @@ class MixEHR_Seed(nn.Module):
         for m, modality_name in enumerate(self.modalities):
             exp_n_path = os.path.join(self.guide_prior_path, f"init_exp_n_{modality_name}.pt")
             if os.path.exists(exp_n_path):
-                self.exp_n[m] = torch.load(exp_n_path, map_location=device)
+                self.exp_n[m] = torch.load(exp_n_path, map_location=device, weights_only=False)
             else:
                 print(f"Warning: {exp_n_path} not found, using zeros for modality {modality_name}")
         
         # Load exp_s for guided modality
         exp_s_path = os.path.join(self.guide_prior_path, f"init_exp_s_{guided_modality_name}.pt")
         if os.path.exists(exp_s_path):
-            self.exp_s = torch.load(exp_s_path, map_location=device)
+            self.exp_s = torch.load(exp_s_path, map_location=device, weights_only=False)
         else:
             print(f"Warning: {exp_s_path} not found, using zeros for exp_s")
         
         # Load exp_m (document-topic matrix, not modality-specific)
         exp_m_path = os.path.join(self.guide_prior_path, "init_exp_m.pt")
         if os.path.exists(exp_m_path):
-            self.exp_m = torch.load(exp_m_path, map_location=device)
+            self.exp_m = torch.load(exp_m_path, map_location=device, weights_only=False)
         else:
             print(f"Warning: {exp_m_path} not found, using zeros for exp_m")
         

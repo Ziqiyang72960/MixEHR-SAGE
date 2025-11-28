@@ -11,8 +11,8 @@ sys.path.append(str(root_dir))
 from corpus import Corpus
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-seeds_topic_matrix = torch.load("../phecode_mapping/seed_topic_matrix.pt", map_location=device) # get seed word-topic mapping, V x K matrix
-topic_prior_alpha = torch.load("../guide_prior/topic_prior_alpha.pt", map_location=device)  # get topic prior alpha, D X K matrix
+seeds_topic_matrix = torch.load("../phecode_mapping/seed_topic_matrix.pt", map_location=device, weights_only=False) # get seed word-topic mapping, V x K matrix
+topic_prior_alpha = torch.load("../guide_prior/topic_prior_alpha.pt", map_location=device, weights_only=False)  # get topic prior alpha, D X K matrix
 c = Corpus.read_corpus_from_directory('../store/', 'corpus.pkl') # read corpus file
 print(f"Vocabulary sizes for {len(c.modalities)} modalities: {c.V}")
 print(f"Modalities: {c.modalities}")

@@ -21,7 +21,7 @@ print(device)
 def run(args):
     # print(args)
     # cmd = args.cmd
-    seeds_topic_matrix = torch.load(args.seed_matrix, map_location=device) # get seed word-topic mapping, V x K matrix
+    seeds_topic_matrix = torch.load(args.seed_matrix, map_location=device, weights_only=False) # get seed word-topic mapping, V x K matrix
     print("V and K are", seeds_topic_matrix.shape) # torch.Size([V, K])
     corpus = Corpus.read_corpus_from_directory(args.corpus)
     print("trained modalities include", corpus.modalities)
