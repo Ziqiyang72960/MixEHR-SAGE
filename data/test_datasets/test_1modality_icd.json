@@ -1,0 +1,202 @@
+[
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "I25.10"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "I25.10"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "I10"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "E11.9"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "I10"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "I10"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "G47.33"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "E78.5"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "J44.1"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "I10"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "I25.10"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "J44.1"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "N18.3"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "J44.1"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "E78.5"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "G47.33"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "N18.3"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "E11.9"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "E11.9"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "G47.33"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "I10"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "I25.10"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "F32.9"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "K21.0"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "E78.5"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "G47.33"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "E78.5"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "J44.1"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "M54.5"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "J44.1"
+  }
+]
