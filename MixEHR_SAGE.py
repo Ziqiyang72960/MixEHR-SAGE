@@ -586,18 +586,27 @@ class MixEHR_SAGE(nn.Module):
         """
         Ultra-fast online inference for new patient's topic mixture (theta/risk).
         
+        Supports any subset of modalities - patients can have data for 1, 2, or all 
+        modalities. Empty modalities are automatically skipped during inference.
+        
         This is optimized for real-time/online inference scenarios:
         - Uses pre-cached phi distributions (no recomputation)
         - Vectorized operations where possible
         - Fewer default iterations (5 vs 10)
+        - Handles partial modality data gracefully
         
         Args:
-            patient_bow: dict of {modality_index: {word_id: frequency}} for each modality
-                        or list of dicts, one per modality
+            patient_bow: list of dicts, one per modality. Each dict maps word_id to frequency.
+                        Empty dicts {} for modalities without data.
+                        Example with only ICD (modality 0): [{0: 1, 5: 2}, {}, {}]
+                        Example with ICD + med: [{0: 1}, {10: 1, 15: 3}, {}]
             num_iterations: number of variational inference iterations (default: 5)
         
         Returns:
             theta: K-dimensional tensor representing patient's topic mixture (risk profile)
+        
+        Note:
+            For easier usage with modality names, use infer_theta_by_modality() instead.
         """
         # Ensure phi is cached
         if not hasattr(self, '_phi_cached') or self._phi_cached is None:
@@ -660,12 +669,78 @@ class MixEHR_SAGE(nn.Module):
         
         return theta
 
+    def infer_theta_by_modality(self, patient_data, num_iterations=5):
+        """
+        Infer theta for a new patient using any subset of modalities.
+        
+        This method allows you to pass data for any combination of modalities
+        (e.g., only ICD codes, or ICD + medications, or all three).
+        
+        Args:
+            patient_data: dict mapping modality name to {word_id: frequency}
+                         e.g., {'icd': {0: 1, 5: 2}, 'med': {10: 1}}
+                         Only include modalities for which you have data.
+            num_iterations: number of variational inference iterations (default: 5)
+        
+        Returns:
+            theta: K-dimensional tensor representing patient's topic mixture (risk profile)
+        
+        Example:
+            # Patient with only ICD codes
+            theta = model.infer_theta_by_modality({'icd': {0: 1, 5: 2}})
+            
+            # Patient with ICD and medication codes
+            theta = model.infer_theta_by_modality({
+                'icd': {0: 1, 5: 2},
+                'med': {10: 1, 15: 3}
+            })
+            
+            # Patient with all modalities
+            theta = model.infer_theta_by_modality({
+                'icd': {0: 1},
+                'med': {10: 1},
+                'opcs': {5: 1}
+            })
+        """
+        # Convert modality names to indices
+        patient_bow = [{} for _ in range(self.modaltiy_num)]
+        
+        for modality_name, bow in patient_data.items():
+            if modality_name in self.modalities:
+                m = self.modalities.index(modality_name)
+                patient_bow[m] = bow
+            else:
+                print(f"Warning: Unknown modality '{modality_name}', skipping. "
+                      f"Available modalities: {self.modalities}")
+        
+        return self.infer_theta_fast(patient_bow, num_iterations)
+
+    def infer_theta_batch_by_modality(self, patients_data_list, num_iterations=5):
+        """
+        Batch inference for multiple patients using modality names.
+        
+        Args:
+            patients_data_list: list of dicts, each mapping modality name to {word_id: freq}
+            num_iterations: number of VI iterations (default: 5)
+        
+        Returns:
+            thetas: (num_patients, K) tensor of topic mixtures
+        """
+        thetas = []
+        for patient_data in patients_data_list:
+            theta = self.infer_theta_by_modality(patient_data, num_iterations)
+            thetas.append(theta)
+        return torch.stack(thetas)
+
     def infer_theta_batch_fast(self, patients_bow_list, num_iterations=5):
         """
         Fast batch inference for multiple new patients.
         
+        Supports any subset of modalities - patients can have data for 1, 2, or all modalities.
+        Empty modalities are automatically skipped.
+        
         Args:
-            patients_bow_list: list of patient_bow dicts
+            patients_bow_list: list of patient_bow dicts (list format with one dict per modality)
             num_iterations: number of VI iterations (default: 5)
         
         Returns:

@@ -116,20 +116,36 @@ model = MixEHR_SAGE.load_trained_model(
     './results/', corpus, seeds_matrix, corpus.modalities
 )
 
-# Fast inference for a single patient (uses cached phi)
-# patient_bow format: [{word_id: freq}, ...] one dict per modality
-patient_bow = [{0: 1, 5: 2}, {10: 1}]  # Example: modality 0 has words 0,5; modality 1 has word 10
-theta = model.infer_theta_fast(patient_bow, num_iterations=5)  # Fast method
-print(f"Patient risk profile: {theta}")
+# --- INFERENCE WITH ANY SUBSET OF MODALITIES ---
+
+# Patient with ONLY ICD codes (no medication or procedure data)
+theta = model.infer_theta_by_modality({'icd': {0: 1, 5: 2}})
+
+# Patient with ICD + medication codes
+theta = model.infer_theta_by_modality({
+    'icd': {0: 1, 5: 2},
+    'med': {10: 1, 15: 3}
+})
+
+# Patient with all three modalities (ICD, medication, procedures)
+theta = model.infer_theta_by_modality({
+    'icd': {0: 1},
+    'med': {10: 1},
+    'opcs': {5: 1}
+})
 
 # Get top risk topics
 top_k = torch.topk(theta, k=5)
 print(f"Top 5 topics: {top_k.indices.tolist()}")
 print(f"Top 5 values: {top_k.values.tolist()}")
 
-# Batch inference for multiple patients
-patients = [patient_bow1, patient_bow2, patient_bow3]
-thetas = model.infer_theta_batch_fast(patients, num_iterations=5)
+# --- BATCH INFERENCE ---
+patients = [
+    {'icd': {0: 1}},                          # Patient 1: only ICD
+    {'icd': {5: 2}, 'med': {10: 1}},          # Patient 2: ICD + med
+    {'icd': {0: 1}, 'med': {15: 1}, 'opcs': {3: 1}}  # Patient 3: all modalities
+]
+thetas = model.infer_theta_batch_by_modality(patients, num_iterations=5)
 ```
 
 # Dynamic Modality Support
