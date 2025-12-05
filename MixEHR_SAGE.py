@@ -365,7 +365,21 @@ class MixEHR_SAGE(nn.Module):
     def infer_theta(self, patient_bow, num_iterations=10):
         """
         Fast online inference for new patient's topic mixture (theta/risk).
-        Uses the learned phi (word-topic distributions) to infer theta for new patients.
+        
+        This implements LDA-style "folding-in" inference using variational Bayes.
+        Uses the LEARNED phi (word-topic distributions) from training to infer 
+        the topic mixture (theta) for new patients.
+        
+        The inference follows these steps (variational E-step):
+        1. For each word w in the new document, compute the topic assignment 
+           probability: gamma_wk ∝ theta_k * phi_wk
+           where phi_wk is the LEARNED word-topic probability P(w|topic k)
+        2. Update theta based on the expected topic counts
+        3. Repeat for num_iterations
+        
+        For the guided modality (ICD codes), we use both:
+        - phi_regular: learned from exp_n (regular word-topic distribution)
+        - phi_seed: learned from exp_s (seed word-topic distribution)
         
         Args:
             patient_bow: dict of {modality_index: {word_id: frequency}} for each modality
@@ -375,7 +389,7 @@ class MixEHR_SAGE(nn.Module):
         Returns:
             theta: K-dimensional tensor representing patient's topic mixture (risk profile)
         """
-        # Initialize theta uniformly
+        # Initialize theta with Dirichlet prior (uniform + alpha)
         theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
         
         # Convert patient_bow to list format if needed
@@ -386,10 +400,22 @@ class MixEHR_SAGE(nn.Module):
             # Convert {modality_idx: bow_dict} to list
             patient_bow = [patient_bow.get(m, {}) for m in range(self.modaltiy_num)]
         
-        # Variational inference iterations
+        # Pre-compute the LEARNED phi (word-topic distributions) for each modality
+        # phi_m[w, k] = P(word w | topic k) for modality m
+        phi = []
+        for m in range(self.modaltiy_num):
+            # Regular phi: (exp_n + beta) / (exp_n_sum + beta_sum)
+            phi_m = (self.exp_n[m] + self.beta) / (self.exp_n_sum[m] + self.beta_sum[m] + mini_val)
+            phi.append(phi_m)
+        
+        # For guided modality, also compute seed phi
+        # phi_seed[w, k] = P(word w | topic k) for seed words
+        phi_seed = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
+        
+        # Variational inference iterations (folding-in)
         for iteration in range(num_iterations):
-            # Accumulate expected counts
-            exp_m_new = torch.zeros(self.K, dtype=torch.double, device=device)
+            # Accumulate expected topic counts for this document
+            exp_topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
             
             for m in range(min(len(patient_bow), self.modaltiy_num)):
                 bow_m = patient_bow[m]
@@ -401,31 +427,29 @@ class MixEHR_SAGE(nn.Module):
                         continue  # Skip unknown words
                     
                     if m == self.guided_modality:
-                        # For guided modality, use both seed and regular topics
-                        # Compute gamma for seed topic
-                        gamma_ss = self.seeds_topic_matrix[word_id] * (theta + self.eta) \
-                                   * (self.mu + self.exp_s[word_id]) / (self.mu_sum + self.exp_s_sum + mini_val) * self.pi
-                        # Compute gamma for regular topic from seed words
-                        gamma_sr = self.seeds_topic_matrix[word_id] * (theta + self.eta) \
-                                   * (self.beta + self.exp_n[m][word_id]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val) * (1 - self.pi)
-                        # Compute gamma for regular words
-                        gamma_rr = (1 - self.seeds_topic_matrix[word_id]) * (theta + self.eta) \
-                                   * (self.beta + self.exp_n[m][word_id]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                        # For guided modality (ICD), use seed-guided inference
+                        # Check if this word is a seed word for any topic
+                        is_seed = self.seeds_topic_matrix[word_id]  # K-dim: 1 if seed for topic k, 0 otherwise
                         
-                        gamma = gamma_ss + gamma_sr + gamma_rr
+                        # gamma_k ∝ theta_k * [pi_k * phi_seed_wk + (1-pi_k) * phi_regular_wk] for seed words
+                        # gamma_k ∝ theta_k * phi_regular_wk for non-seed words
+                        gamma_seed = is_seed * theta * phi_seed[word_id] * self.pi
+                        gamma_regular = theta * phi[m][word_id] * (1 - self.pi * is_seed)
+                        gamma = gamma_seed + gamma_regular
                     else:
-                        # For unguided modality
-                        gamma = (theta + self.eta) * (self.beta + self.exp_n[m][word_id]) \
-                                / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                        # For unguided modality, standard LDA inference
+                        # gamma_k ∝ theta_k * phi_wk
+                        gamma = theta * phi[m][word_id]
                     
-                    # Normalize
+                    # Normalize to get topic assignment probabilities
                     gamma = gamma / (gamma.sum() + mini_val)
                     
-                    # Accumulate
-                    exp_m_new += gamma * freq
+                    # Accumulate expected counts (weighted by word frequency)
+                    exp_topic_counts += gamma * freq
             
-            # Update theta
-            theta = (exp_m_new + self.eta) / (exp_m_new.sum() + self.K * self.eta)
+            # Update theta using variational update
+            # theta_k ∝ alpha + sum_w (gamma_wk * n_w)
+            theta = (exp_topic_counts + self.eta) / (exp_topic_counts.sum() + self.K * self.eta)
         
         return theta
 
@@ -461,15 +485,29 @@ class MixEHR_SAGE(nn.Module):
     def get_phi(self, modality=0):
         """
         Get the learned phi (word-topic distribution) for a specific modality.
+        This is the regular word-topic distribution learned from exp_n.
+        
+        In LDA terms: phi_wk = P(word w | topic k)
         
         Args:
             modality: modality index (default: 0, the guided modality)
         
         Returns:
-            phi: (V, K) tensor where each column is a topic's word distribution
+            phi: (V, K) tensor where phi[w,k] = P(word w | topic k)
         """
-        phi = (self.exp_n[modality] + self.beta) / (self.exp_n_sum[modality] + self.beta_sum[modality])
+        phi = (self.exp_n[modality] + self.beta) / (self.exp_n_sum[modality] + self.beta_sum[modality] + mini_val)
         return phi
+
+    def get_phi_seed(self):
+        """
+        Get the learned seed phi (seed word-topic distribution) for the guided modality.
+        This is specific to MixEHR-SAGE's seed-guided topic model.
+        
+        Returns:
+            phi_seed: (V, K) tensor for seed word-topic distribution
+        """
+        phi_seed = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
+        return phi_seed
 
     @staticmethod
     def load_trained_model(model_path, corpus, seeds_topic_matrix, modality_list, 
