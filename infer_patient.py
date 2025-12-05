@@ -99,10 +99,11 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         patient_df, vocab_mappings, modality_list, word_column
     )
     
-    # Infer theta for each patient
+    # Infer theta for each patient using FAST inference method
     results = []
     for patient_id, bow in patients_bow.items():
-        theta = model.infer_theta(bow, num_iterations=num_iterations)
+        # Use fast inference with cached phi distributions
+        theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
         for k in range(len(theta_np)):

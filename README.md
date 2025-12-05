@@ -54,14 +54,14 @@ optional arguments:
 
 # Online Patient Inference
 
-After training, you can quickly infer topic mixtures (theta/patient risk) for new patients using the `infer_patient.py` script:
+After training, you can quickly infer topic mixtures (theta/patient risk) for new patients using the `infer_patient.py` script. The inference uses **pre-cached phi distributions** for fast real-time inference.
 
 ```bash
-# Basic inference
+# Basic fast inference (uses cached phi, vectorized operations)
 python infer_patient.py ./results/ ./new_patients.csv -o patient_theta.csv
 
 # With more iterations for better accuracy
-python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --iterations 20
+python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --iterations 10
 
 # Output only top-5 topics per patient
 python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --top-k 5
@@ -82,50 +82,54 @@ positional arguments:
 optional arguments:
   --output, -o          Output file for theta values (default: patient_theta.csv)
   --corpus, -c          Path to corpus directory (default: ./store/)
-  --iterations, -i      Number of VI iterations (default: 10)
+  --iterations, -i      Number of VI iterations (default: 5 for speed)
   --top-k, -k           Output only top-k topics per patient
 ```
 
 ## Input Data Format
 
-The patient data file should contain:
+New patients only need ICD codes (no PheCode mapping required):
 - `SUBJECT_ID`: patient identifier
-- `code` (or specified word column): medical codes
+- `code` (or specified word column): ICD codes
 
 Example CSV:
 ```csv
 SUBJECT_ID,code
-patient1,E11.9
-patient1,I10
-patient2,E11.0
+new_patient_1,E11.9
+new_patient_1,I10
+new_patient_2,J44.1
 ```
 
-## Programmatic Inference
+## Programmatic Inference (Fast Online API)
 
-You can also use the inference API directly in Python:
+You can also use the fast inference API directly in Python:
 
 ```python
 from MixEHR_SAGE import MixEHR_SAGE
 from corpus import Corpus
 import torch
 
-# Load trained model
+# Load trained model (automatically caches phi for fast inference)
 corpus = Corpus.read_corpus_from_directory('./store/')
 seeds_matrix = torch.load('./phecode_mapping/seed_topic_matrix.pt')
 model = MixEHR_SAGE.load_trained_model(
     './results/', corpus, seeds_matrix, corpus.modalities
 )
 
-# Infer theta for a single patient
+# Fast inference for a single patient (uses cached phi)
 # patient_bow format: [{word_id: freq}, ...] one dict per modality
 patient_bow = [{0: 1, 5: 2}, {10: 1}]  # Example: modality 0 has words 0,5; modality 1 has word 10
-theta = model.infer_theta(patient_bow, num_iterations=10)
+theta = model.infer_theta_fast(patient_bow, num_iterations=5)  # Fast method
 print(f"Patient risk profile: {theta}")
 
 # Get top risk topics
 top_k = torch.topk(theta, k=5)
 print(f"Top 5 topics: {top_k.indices.tolist()}")
 print(f"Top 5 values: {top_k.values.tolist()}")
+
+# Batch inference for multiple patients
+patients = [patient_bow1, patient_bow2, patient_bow3]
+thetas = model.infer_theta_batch_fast(patients, num_iterations=5)
 ```
 
 # Dynamic Modality Support
