@@ -64,8 +64,12 @@ def convert_patient_data_to_bow(patient_df, vocab_mappings, modality_list, word_
     patients_bow = {}
     
     for _, row in patient_df.iterrows():
-        patient_id = row['SUBJECT_ID']
-        code = row[word_column]
+        patient_id = str(row['SUBJECT_ID'])  # Convert to string
+        code = str(row[word_column]).strip()  # Convert to string and strip whitespace
+        
+        # Skip NaN or empty codes
+        if code == 'nan' or code == '' or pd.isna(row[word_column]):
+            continue
         
         if patient_id not in patients_bow:
             patients_bow[patient_id] = [{} for _ in modality_list]
@@ -103,7 +107,12 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
             
         # Get modality index
         if modality_name not in modality_list:
-            print(f"Warning: Unknown modality '{modality_name}', skipping. Available: {modality_list}")
+            print(f"ERROR: Modality '{modality_name}' not found in trained model.")
+            print(f"  Available modalities in model: {modality_list}")
+            print(f"  The model was only trained with these modalities.")
+            print(f"  To use '{modality_name}', you need to:")
+            print(f"    1. Add '{modality_name}' to data/ukbb_metadata.csv")
+            print(f"    2. Retrain the model with: python run_MixEHR.py ./data/")
             continue
         m = modality_list.index(modality_name)
         
@@ -111,12 +120,20 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
         df = read_data_file(file_path)
         print(f"Loaded {len(df)} records from {file_path} for modality '{modality_name}'")
         
+        # Show sample codes from input file
+        sample_codes = df[word_column].dropna().astype(str).str.strip().unique()[:5]
+        print(f"  Sample codes in input file: {list(sample_codes)}")
+        
         # Check if vocabulary exists
         if modality_name not in vocab_mappings:
             print(f"ERROR: No vocabulary mapping found for modality '{modality_name}'")
-            print(f"Available vocabularies: {list(vocab_mappings.keys())}")
-            print(f"Make sure {modality_name}_vocab_ids.pkl exists in the mapping directory")
+            print(f"  Available vocabularies: {list(vocab_mappings.keys())}")
+            print(f"  Make sure {modality_name}_vocab_ids.pkl exists in the mapping directory")
             continue
+        
+        # Show sample vocabulary codes for comparison
+        vocab_sample = list(vocab_mappings[modality_name].keys())[:5]
+        print(f"  Sample codes in '{modality_name}' vocabulary: {vocab_sample}")
         
         # Track statistics
         total_codes = 0
@@ -125,8 +142,13 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
         
         # Process each row
         for _, row in df.iterrows():
-            patient_id = row['SUBJECT_ID']
-            code = row[word_column]
+            patient_id = str(row['SUBJECT_ID'])  # Convert to string
+            code = str(row[word_column]).strip()  # Convert to string and strip whitespace
+            
+            # Skip NaN or empty codes
+            if code == 'nan' or code == '' or pd.isna(row[word_column]):
+                continue
+                
             total_codes += 1
             
             if patient_id not in patients_bow:
