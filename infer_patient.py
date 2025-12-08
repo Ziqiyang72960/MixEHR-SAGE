@@ -3,17 +3,24 @@
 Fast online inference for new patient risk (theta) using trained MixEHR-SAGE model.
 
 Usage:
-    python infer_patient.py <model_path> <patient_data> [options]
+    # Single file with all modalities
+    python infer_patient.py ./results/ --data ./new_patients.csv --output patient_theta.csv
+
+    # Separate files for each modality
+    python infer_patient.py ./results/ --icd icd_data.csv --med med_data.csv --output theta.csv
 
 Examples:
-    # Infer theta for a single patient from CSV
-    python infer_patient.py ./results/ ./new_patient.csv --output patient_theta.csv
+    # Single file inference
+    python infer_patient.py ./results/ --data ./new_patients.csv -o patient_theta.csv
 
-    # Infer theta for multiple patients
-    python infer_patient.py ./results/ ./new_patients.csv --output patients_theta.csv
+    # ICD codes only
+    python infer_patient.py ./results/ --icd ./patient_icd.csv -o theta.csv
 
-    # Use JSON input format
-    python infer_patient.py ./results/ ./new_patient.json --output patient_theta.json
+    # ICD + medications
+    python infer_patient.py ./results/ --icd ./icd.csv --med ./med.csv -o theta.csv
+
+    # All modalities from separate files
+    python infer_patient.py ./results/ --icd ./icd.csv --med ./med.csv --opcs ./opcs.csv -o theta.csv
 """
 import argparse
 import os
@@ -75,6 +82,91 @@ def convert_patient_data_to_bow(patient_df, vocab_mappings, modality_list, word_
     return patients_bow
 
 
+def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list, word_column='code'):
+    """
+    Convert separate modality files to bag-of-words format.
+    
+    Args:
+        modality_files: dict of {modality_name: file_path}
+        vocab_mappings: dict of {modality: {word: id}}
+        modality_list: list of modality names in order
+        word_column: column name containing the codes/words
+    
+    Returns:
+        dict: {patient_id: [{word_id: freq}, ...]} for each modality
+    """
+    patients_bow = {}
+    
+    for modality_name, file_path in modality_files.items():
+        if file_path is None or not os.path.exists(file_path):
+            continue
+            
+        # Get modality index
+        if modality_name not in modality_list:
+            print(f"Warning: Unknown modality '{modality_name}', skipping. Available: {modality_list}")
+            continue
+        m = modality_list.index(modality_name)
+        
+        # Read modality data
+        df = read_data_file(file_path)
+        print(f"Loaded {len(df)} records from {file_path} for modality '{modality_name}'")
+        
+        # Process each row
+        for _, row in df.iterrows():
+            patient_id = row['SUBJECT_ID']
+            code = row[word_column]
+            
+            if patient_id not in patients_bow:
+                patients_bow[patient_id] = [{} for _ in modality_list]
+            
+            # Look up word ID in vocabulary
+            if modality_name in vocab_mappings and code in vocab_mappings[modality_name]:
+                word_id = vocab_mappings[modality_name][code]
+                if word_id not in patients_bow[patient_id][m]:
+                    patients_bow[patient_id][m][word_id] = 0
+                patients_bow[patient_id][m][word_id] += 1
+    
+    return patients_bow
+
+
+def infer_from_modality_files(model, modality_files, vocab_mappings, modality_list,
+                               word_column='code', num_iterations=10):
+    """
+    Infer theta for patients from separate modality files.
+    
+    Args:
+        model: trained MixEHR_SAGE model
+        modality_files: dict of {modality_name: file_path}
+        vocab_mappings: vocabulary mappings
+        modality_list: list of modality names
+        word_column: column name for codes
+        num_iterations: VI iterations
+    
+    Returns:
+        DataFrame with patient_id and theta values
+    """
+    # Convert to BOW format
+    patients_bow = convert_modality_files_to_bow(
+        modality_files, vocab_mappings, modality_list, word_column
+    )
+    
+    if not patients_bow:
+        print("Warning: No valid patient data found in provided files.")
+        return pd.DataFrame(columns=['patient_id'])
+    
+    # Infer theta for each patient using FAST inference method
+    results = []
+    for patient_id, bow in patients_bow.items():
+        theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
+        theta_np = theta.cpu().numpy()
+        result = {'patient_id': patient_id}
+        for k in range(len(theta_np)):
+            result[f'topic_{k}'] = theta_np[k]
+        results.append(result)
+    
+    return pd.DataFrame(results)
+
+
 def infer_from_file(model, patient_file, vocab_mappings, modality_list, 
                     word_column='code', num_iterations=10):
     """
@@ -119,14 +211,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Infer theta for patients from CSV
-    python infer_patient.py ./results/ ./new_patients.csv -o patient_theta.csv
+    # Single file with all modalities (auto-detect which codes belong to which modality)
+    python infer_patient.py ./results/ --data ./new_patients.csv -o patient_theta.csv
 
-    # Use more VI iterations for better accuracy
-    python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --iterations 20
+    # Separate files for each modality
+    python infer_patient.py ./results/ --icd ./icd_data.csv --med ./med_data.csv -o theta.csv
+
+    # ICD codes only
+    python infer_patient.py ./results/ --icd ./patient_icd.csv -o theta.csv
+
+    # All three modalities from separate files
+    python infer_patient.py ./results/ --icd ./icd.csv --med ./med.csv --opcs ./opcs.csv -o theta.csv --iterations 10
 
 Input Data Format:
-    The input file should have at minimum:
+    Each input file should have at minimum:
     - SUBJECT_ID: patient identifier
     - code (or specified word_column): medical codes
 
@@ -142,8 +240,24 @@ Input Data Format:
         help='Path to directory containing trained model (results folder)'
     )
     parser.add_argument(
-        'patient_data',
-        help='Path to patient data file (CSV, TSV, JSON, TXT)'
+        '--data', '-d',
+        default=None,
+        help='Path to single patient data file with all modalities (CSV, TSV, JSON, TXT)'
+    )
+    parser.add_argument(
+        '--icd',
+        default=None,
+        help='Path to ICD codes file (CSV, TSV, JSON, TXT)'
+    )
+    parser.add_argument(
+        '--med',
+        default=None,
+        help='Path to medication/ATC codes file (CSV, TSV, JSON, TXT)'
+    )
+    parser.add_argument(
+        '--opcs',
+        default=None,
+        help='Path to OPCS procedure codes file (CSV, TSV, JSON, TXT)'
     )
     parser.add_argument(
         '--output', '-o',
@@ -190,12 +304,15 @@ Input Data Format:
     
     args = parser.parse_args()
     
-    # Validate paths
+    # Validate model path
     if not os.path.exists(args.model_path):
         print(f"Error: Model path '{args.model_path}' does not exist.")
         sys.exit(1)
-    if not os.path.exists(args.patient_data):
-        print(f"Error: Patient data file '{args.patient_data}' does not exist.")
+    
+    # Validate that at least one data source is provided
+    has_modality_files = args.icd or args.med or args.opcs
+    if not has_modality_files and not args.data:
+        print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
         sys.exit(1)
     
     print(f"Loading model from {args.model_path}...")
@@ -223,16 +340,44 @@ Input Data Format:
     vocab_mappings = load_vocab_mappings(args.mapping)
     print(f"Loaded vocabulary mappings for: {list(vocab_mappings.keys())}")
     
-    # Infer theta
-    print(f"Inferring theta for patients in {args.patient_data}...")
-    results_df = infer_from_file(
-        model, 
-        args.patient_data, 
-        vocab_mappings, 
-        modality_list,
-        word_column=args.word_column,
-        num_iterations=args.iterations
-    )
+    # Determine which mode to use: separate modality files or single file
+    modality_files = {}
+    if args.icd:
+        modality_files['icd'] = args.icd
+    if args.med:
+        modality_files['med'] = args.med
+    if args.opcs:
+        modality_files['opcs'] = args.opcs
+    
+    # Check if we have modality-specific files or a single data file
+    if modality_files:
+        # Use separate modality files
+        print(f"Using separate modality files: {modality_files}")
+        results_df = infer_from_modality_files(
+            model, 
+            modality_files, 
+            vocab_mappings, 
+            modality_list,
+            word_column=args.word_column,
+            num_iterations=args.iterations
+        )
+    elif args.data:
+        # Use single data file
+        if not os.path.exists(args.data):
+            print(f"Error: Patient data file '{args.data}' does not exist.")
+            sys.exit(1)
+        print(f"Inferring theta for patients in {args.data}...")
+        results_df = infer_from_file(
+            model, 
+            args.data, 
+            vocab_mappings, 
+            modality_list,
+            word_column=args.word_column,
+            num_iterations=args.iterations
+        )
+    else:
+        print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
+        sys.exit(1)
     
     # Filter to top-k if specified
     if args.top_k is not None:

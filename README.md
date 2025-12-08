@@ -56,48 +56,71 @@ optional arguments:
 
 After training, you can quickly infer topic mixtures (theta/patient risk) for new patients using the `infer_patient.py` script. The inference uses **pre-cached phi distributions** for fast real-time inference.
 
-```bash
-# Basic fast inference (uses cached phi, vectorized operations)
-python infer_patient.py ./results/ ./new_patients.csv -o patient_theta.csv
+## Command Line Usage
 
-# With more iterations for better accuracy
-python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --iterations 10
+```bash
+# Single file with all modalities (auto-detect which codes belong to which modality)
+python infer_patient.py ./results/ --data ./new_patients.csv -o patient_theta.csv
+
+# Separate files for each modality
+python infer_patient.py ./results/ --icd ./icd_data.csv --med ./med_data.csv -o theta.csv
+
+# ICD codes only
+python infer_patient.py ./results/ --icd ./patient_icd.csv -o theta.csv
+
+# All three modalities from separate files
+python infer_patient.py ./results/ \
+  --icd ./patient_icd.csv \
+  --med ./patient_med.csv \
+  --opcs ./patient_opcs.csv \
+  --output theta.csv \
+  --iterations 10
 
 # Output only top-5 topics per patient
-python infer_patient.py ./results/ ./new_patients.csv -o theta.csv --top-k 5
+python infer_patient.py ./results/ --icd ./icd.csv -o theta.csv --top-k 5
 ```
 
 ## Inference Options
 
 ```
-usage: infer_patient.py [-h] [--output OUTPUT] [--corpus CORPUS] 
-                        [--seed-matrix SEED_MATRIX] [--mapping MAPPING]
-                        [--iterations ITERATIONS] [--top-k TOP_K]
-                        model_path patient_data
+usage: infer_patient.py [-h] [--data DATA] [--icd ICD] [--med MED] [--opcs OPCS]
+                        [--output OUTPUT] [--corpus CORPUS] [--iterations ITERATIONS]
+                        [--top-k TOP_K] model_path
 
 positional arguments:
   model_path            Path to trained model directory (results folder)
-  patient_data          Path to patient data file (CSV, TSV, JSON, TXT)
 
 optional arguments:
+  --data, -d            Path to single patient data file with all modalities
+  --icd                 Path to ICD codes file (CSV, TSV, JSON, TXT)
+  --med                 Path to medication/ATC codes file (CSV, TSV, JSON, TXT)
+  --opcs                Path to OPCS procedure codes file (CSV, TSV, JSON, TXT)
   --output, -o          Output file for theta values (default: patient_theta.csv)
   --corpus, -c          Path to corpus directory (default: ./store/)
-  --iterations, -i      Number of VI iterations (default: 5 for speed)
+  --iterations, -i      Number of VI iterations (default: 10)
   --top-k, -k           Output only top-k topics per patient
 ```
 
 ## Input Data Format
 
-New patients only need ICD codes (no PheCode mapping required):
+Each input file should have at minimum:
 - `SUBJECT_ID`: patient identifier
-- `code` (or specified word column): ICD codes
+- `code` (or specified word column): medical codes
 
-Example CSV:
+Example CSV for ICD codes:
 ```csv
 SUBJECT_ID,code
 new_patient_1,E11.9
 new_patient_1,I10
 new_patient_2,J44.1
+```
+
+Example CSV for medications:
+```csv
+SUBJECT_ID,code
+new_patient_1,A02BC01
+new_patient_1,C07AA05
+new_patient_2,N02BE01
 ```
 
 ## Programmatic Inference (Fast Online API)
