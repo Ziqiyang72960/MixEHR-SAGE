@@ -753,6 +753,26 @@ class MixEHR_SAGE(nn.Module):
         return torch.stack(thetas)
     
     @staticmethod
+    def _is_header_row(row_data):
+        """
+        Detect if a row is a header by checking if it contains non-numeric data.
+        
+        Args:
+            row_data: pandas Series containing the row data (excluding first column)
+        
+        Returns:
+            bool: True if row appears to be a header
+        """
+        # Check first few values to see if they're numeric
+        for val in row_data.head(min(5, len(row_data))):
+            try:
+                float(val)
+            except (ValueError, TypeError):
+                # If we can't convert to float, it's likely a header
+                return True
+        return False
+    
+    @staticmethod
     def load_phi_from_csv(phi_csv_paths, modalities):
         """
         Load phi distributions from external CSV files.
@@ -796,8 +816,16 @@ class MixEHR_SAGE(nn.Module):
                 csv_path = phi_csv_paths[modality]
                 print(f"Loading phi for {modality} from {csv_path}")
                 
+                # Load CSV - first check if there's a header row
+                # Read first two rows to detect header
+                df_test = pd.read_csv(csv_path, nrows=2, header=None, low_memory=False)
+                
+                # Check if first row is a header (contains topic names or similar non-numeric data)
+                # Header typically has strings like "Topic_0", "Topic_1", etc.
+                header_row = 0 if MixEHR_SAGE._is_header_row(df_test.iloc[0, 1:]) else None
+                
                 # Load CSV with first column as index (ICD codes + descriptions)
-                df = pd.read_csv(csv_path, header=None, index_col=0, low_memory=False)
+                df = pd.read_csv(csv_path, header=header_row, index_col=0, dtype=float, low_memory=False)
                 
                 # Extract codes and create mapping
                 code_to_desc = {}
