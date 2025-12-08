@@ -761,6 +761,9 @@ class MixEHR_SAGE(nn.Module):
         from CSV files instead of training a model. Useful when you have pre-trained
         phi distributions from external sources (e.g., UKB_phi_icd.csv).
         
+        The first column of the CSV should contain ICD codes with descriptions (e.g., "A00.0 Cholera").
+        These will be parsed to extract codes and create a vocabulary mapping.
+        
         Args:
             phi_csv_paths: dict mapping modality name to CSV file path
                           e.g., {'icd': 'UKB_phi_icd.csv', 'med': 'UKB_phi_med.csv'}
@@ -768,10 +771,12 @@ class MixEHR_SAGE(nn.Module):
             modalities: list of modality names in order (e.g., ['icd', 'med', 'opcs'])
         
         Returns:
-            phi_distributions: list of tensors, one per modality [V_m x K]
+            tuple: (phi_distributions, code_mappings)
+                phi_distributions: list of tensors, one per modality [V_m x K]
+                code_mappings: dict mapping modality to {code: full_description}
         
         Example:
-            phi_dists = MixEHR_SAGE.load_phi_from_csv({
+            phi_dists, code_maps = MixEHR_SAGE.load_phi_from_csv({
                 'icd': 'UKB_phi_icd.csv',
                 'med': 'UKB_phi_med.csv',
                 'opcs': 'UKB_phi_opcs.csv'
@@ -784,22 +789,41 @@ class MixEHR_SAGE(nn.Module):
             phi_csv_paths = {modalities[0]: phi_csv_paths}
         
         phi_distributions = []
+        code_mappings = {}
+        
         for modality in modalities:
             if modality in phi_csv_paths:
                 csv_path = phi_csv_paths[modality]
                 print(f"Loading phi for {modality} from {csv_path}")
                 
-                # Load CSV with dtype=float to avoid mixed type warnings
-                df = pd.read_csv(csv_path, header=None, dtype=float, low_memory=False)
-                phi_np = df.values
+                # Load CSV with first column as index (ICD codes + descriptions)
+                df = pd.read_csv(csv_path, header=None, index_col=0, low_memory=False)
+                
+                # Extract codes and create mapping
+                code_to_desc = {}
+                for full_desc in df.index:
+                    full_desc_str = str(full_desc)
+                    # Extract code (first part before space)
+                    parts = full_desc_str.split(maxsplit=1)
+                    code = parts[0]
+                    code_to_desc[code] = full_desc_str
+                    # Also map full description to itself
+                    code_to_desc[full_desc_str] = full_desc_str
+                
+                code_mappings[modality] = code_to_desc
+                
+                # Convert to numpy array (all columns except index)
+                phi_np = df.values.astype(float)
                 phi_tensor = torch.tensor(phi_np, dtype=torch.double, device=device)
                 phi_distributions.append(phi_tensor)
                 print(f"  Loaded phi shape: {phi_tensor.shape} (V={phi_tensor.shape[0]}, K={phi_tensor.shape[1]})")
+                print(f"  Created code mapping with {len(code_to_desc)} entries")
             else:
                 print(f"Warning: No phi CSV provided for modality '{modality}', skipping")
                 phi_distributions.append(None)
+                code_mappings[modality] = {}
         
-        return phi_distributions
+        return phi_distributions, code_mappings
     
     def infer_theta_with_external_phi(self, patient_data, phi_distributions, phi_seed=None, num_iterations=10):
         """

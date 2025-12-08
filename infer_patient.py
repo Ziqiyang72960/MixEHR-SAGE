@@ -644,8 +644,24 @@ Input Data Format:
     
     if phi_csv_files:
         print(f"\nLoading external phi distributions from CSV files...")
-        external_phi = MixEHR_SAGE.load_phi_from_csv(phi_csv_files, modality_list)
+        external_phi, phi_code_mappings = MixEHR_SAGE.load_phi_from_csv(phi_csv_files, modality_list)
         print(f"External phi loaded for: {[m for m, phi in zip(modality_list, external_phi) if phi is not None]}")
+        
+        # Update vocab mappings with code mappings from phi CSV
+        for modality, code_map in phi_code_mappings.items():
+            if code_map and modality in vocab_mappings:
+                # Create reverse mapping: full description -> vocab_id
+                # The vocab_ids in vocab_mappings map original codes to indices
+                # We need to update it so both code and full description map to same index
+                print(f"  Updating {modality} vocabulary with {len(code_map)} code mappings from phi CSV")
+                
+                # Build new vocab mapping that includes both formats
+                existing_vocab = vocab_mappings[modality]
+                for code, full_desc in code_map.items():
+                    # If code is in existing vocab, add full_desc mapping to same index
+                    if code in existing_vocab:
+                        vocab_id = existing_vocab[code]
+                        existing_vocab[full_desc] = vocab_id
     
     # Determine which mode to use: separate modality files or single file
     modality_files = {}
