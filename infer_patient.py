@@ -274,6 +274,36 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
     return pd.DataFrame(results)
 
 
+def load_phecode_definitions(phecode_def_path='./mapping/phecode_definitions1.2.csv'):
+    """Load PheCode definitions (PheCode -> Phenotype name mapping)."""
+    try:
+        phecode_df = pd.read_csv(phecode_def_path)
+        # Create dictionary: phecode -> phenotype name
+        phecode_dict = dict(zip(phecode_df['phecode'].astype(str), phecode_df['phenotype']))
+        return phecode_dict
+    except Exception as e:
+        print(f"Warning: Could not load PheCode definitions from {phecode_def_path}: {e}")
+        return {}
+
+
+def load_phecode_ids_mapping(phecode_ids_path='./mapping/phecode_ids.pkl'):
+    """Load PheCode IDs mapping (topic index -> PheCode)."""
+    try:
+        with open(phecode_ids_path, 'rb') as f:
+            phecode_ids = pickle.load(f)
+        # Create inverse mapping: topic_idx -> phecode
+        if isinstance(phecode_ids, dict):
+            # If it's already {phecode: idx}, invert it
+            inv_phecode_ids = {idx: str(phecode) for phecode, idx in phecode_ids.items()}
+        else:
+            # If it's a list/array, use index as topic_idx
+            inv_phecode_ids = {i: str(phecode) for i, phecode in enumerate(phecode_ids)}
+        return inv_phecode_ids
+    except Exception as e:
+        print(f"Warning: Could not load PheCode IDs from {phecode_ids_path}: {e}")
+        return {}
+
+
 def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, vocab_mappings, 
                                          modality_list, top_k_topics=5, top_n_codes=10):
     """
@@ -292,6 +322,9 @@ def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, v
     Returns:
         str: formatted ChatGPT prompt
     """
+    # Load PheCode definitions and mappings
+    phecode_dict = load_phecode_definitions()
+    inv_phecode_ids = load_phecode_ids_mapping()
     # Convert theta to numpy if needed
     if torch.is_tensor(theta):
         theta_np = theta.cpu().numpy()
@@ -357,7 +390,17 @@ These represent the patient's probability distribution over latent phenotypes/di
 """
     
     for i, (topic_idx, prob) in enumerate(zip(top_topic_indices, top_topic_probs), 1):
-        prompt += f"\n  Topic {topic_idx}: {prob:.4f} ({prob*100:.2f}%)"
+        # Get PheCode and phenotype name for this topic
+        topic_label = f"Topic {topic_idx}"
+        if topic_idx in inv_phecode_ids:
+            phecode = inv_phecode_ids[topic_idx]
+            if phecode in phecode_dict:
+                phenotype_name = phecode_dict[phecode]
+                topic_label = f"PheCode {phecode} ({phenotype_name})"
+            else:
+                topic_label = f"PheCode {phecode}"
+        
+        prompt += f"\n  {topic_label}: {prob:.4f} ({prob*100:.2f}%)"
     
     prompt += "\n\n**Input 2: Patient's Medical Records**\n"
     prompt += "The actual medical codes observed for this patient:\n"
@@ -373,7 +416,17 @@ These represent the patient's probability distribution over latent phenotypes/di
     prompt += f"These are the top {top_n_codes} most probable codes for each of the patient's dominant topics:\n"
     
     for topic_idx in top_topic_indices:
-        prompt += f"\n  Topic {topic_idx} (probability {theta_np[topic_idx]:.4f}):"
+        # Get PheCode label for this topic
+        topic_label = f"Topic {topic_idx}"
+        if topic_idx in inv_phecode_ids:
+            phecode = inv_phecode_ids[topic_idx]
+            if phecode in phecode_dict:
+                phenotype_name = phecode_dict[phecode]
+                topic_label = f"PheCode {phecode} ({phenotype_name})"
+            else:
+                topic_label = f"PheCode {phecode}"
+        
+        prompt += f"\n  {topic_label} (probability {theta_np[topic_idx]:.4f}):"
         if topic_idx in topic_top_codes:
             for modality_name, codes_info in topic_top_codes[topic_idx].items():
                 prompt += f"\n    {modality_name.upper()}: {', '.join(codes_info)}"
@@ -494,7 +547,7 @@ Input Data Format:
     parser.add_argument(
         '--explain-output',
         default='patient_explanations.txt',
-        help='Output file for ChatGPT explanation prompts (default: patient_explanations.txt)'
+        help='Output file for ChatGPT explanation prompts. Supports .txt, .csv, .json formats. Each patient gets a separate entry. (default: patient_explanations.txt)'
     )
     parser.add_argument(
         '--explain-top-topics',
@@ -678,17 +731,35 @@ Input Data Format:
                 'prompt': prompt
             })
         
-        # Save explanations to file
-        with open(args.explain_output, 'w') as f:
-            for i, expl in enumerate(explanations):
-                if i > 0:
-                    f.write("\n\n" + "="*80 + "\n\n")
-                f.write(f"Patient ID: {expl['patient_id']}\n")
-                f.write("="*80 + "\n\n")
-                f.write(expl['prompt'])
+        # Save explanations to file based on format
+        explain_ext = os.path.splitext(args.explain_output.lower())[1]
         
-        print(f"Generated {len(explanations)} explanation prompts")
-        print(f"Explanations saved to {args.explain_output}")
+        if explain_ext == '.json':
+            # Save as JSON (one object per patient)
+            with open(args.explain_output, 'w') as f:
+                json.dump(explanations, f, indent=2)
+            print(f"Generated {len(explanations)} explanation prompts")
+            print(f"Explanations saved to {args.explain_output} (JSON format)")
+            
+        elif explain_ext == '.csv':
+            # Save as CSV (one row per patient)
+            explanations_df = pd.DataFrame(explanations)
+            explanations_df.to_csv(args.explain_output, index=False)
+            print(f"Generated {len(explanations)} explanation prompts")
+            print(f"Explanations saved to {args.explain_output} (CSV format)")
+            
+        else:
+            # Save as TXT (one section per patient, easy to separate)
+            with open(args.explain_output, 'w') as f:
+                for i, expl in enumerate(explanations):
+                    if i > 0:
+                        f.write("\n\n" + "="*80 + "\n\n")
+                    f.write(f"Patient ID: {expl['patient_id']}\n")
+                    f.write("="*80 + "\n\n")
+                    f.write(expl['prompt'])
+            print(f"Generated {len(explanations)} explanation prompts")
+            print(f"Explanations saved to {args.explain_output} (TXT format)")
+        
         print(f"\nYou can copy these prompts and paste them into ChatGPT for detailed explanations.")
 
 

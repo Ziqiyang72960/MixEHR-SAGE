@@ -109,22 +109,35 @@ optional arguments:
 
 ### ChatGPT Explanations
 
-Generate detailed explanation prompts for ChatGPT to interpret patient phenotype probabilities:
+Generate detailed explanation prompts for ChatGPT to interpret patient phenotype probabilities. **Each patient gets a separate entry** for easy use:
 
 ```bash
-# Generate explanations with inference
+# Generate explanations with inference (TXT format - one section per patient)
 python infer_patient.py ./results/ --icd ./patient_icd.csv \
   --explain --explain-output explanations.txt
+
+# Save as CSV (one row per patient)
+python infer_patient.py ./results/ --icd ./patient_icd.csv \
+  --explain --explain-output explanations.csv
+
+# Save as JSON (one object per patient)
+python infer_patient.py ./results/ --icd ./patient_icd.csv \
+  --explain --explain-output explanations.json
 
 # Customize number of topics and codes in explanations
 python infer_patient.py ./results/ --icd ./icd.csv \
   --explain --explain-top-topics 3 --explain-top-codes 15
 ```
 
+**Output formats:**
+- **TXT**: One section per patient, separated by dividers (easy to copy individual prompts)
+- **CSV**: One row per patient with `patient_id` and `prompt` columns
+- **JSON**: Array of objects with `patient_id` and `prompt` fields
+
 The generated prompts include:
-1. **Top K inferred topic mixtures** - Patient's probability distribution over phenotypes
+1. **Top K inferred topic mixtures (θ)** - Patient's probability distribution over **PheCodes with phenotype names**
 2. **Patient medical records** - Actual codes observed for the patient
-3. **Top codes for each topic** - Most probable codes defining each phenotype (based on φ)
+3. **Top codes for each topic (φ)** - Most probable codes defining each **PheCode phenotype**
 
 Copy the generated prompts to ChatGPT for human-readable explanations of the patient's risk profile.
 
