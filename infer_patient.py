@@ -111,20 +111,45 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
         df = read_data_file(file_path)
         print(f"Loaded {len(df)} records from {file_path} for modality '{modality_name}'")
         
+        # Check if vocabulary exists
+        if modality_name not in vocab_mappings:
+            print(f"ERROR: No vocabulary mapping found for modality '{modality_name}'")
+            print(f"Available vocabularies: {list(vocab_mappings.keys())}")
+            print(f"Make sure {modality_name}_vocab_ids.pkl exists in the mapping directory")
+            continue
+        
+        # Track statistics
+        total_codes = 0
+        matched_codes = 0
+        unknown_codes = set()
+        
         # Process each row
         for _, row in df.iterrows():
             patient_id = row['SUBJECT_ID']
             code = row[word_column]
+            total_codes += 1
             
             if patient_id not in patients_bow:
                 patients_bow[patient_id] = [{} for _ in modality_list]
             
             # Look up word ID in vocabulary
-            if modality_name in vocab_mappings and code in vocab_mappings[modality_name]:
+            if code in vocab_mappings[modality_name]:
                 word_id = vocab_mappings[modality_name][code]
                 if word_id not in patients_bow[patient_id][m]:
                     patients_bow[patient_id][m][word_id] = 0
                 patients_bow[patient_id][m][word_id] += 1
+                matched_codes += 1
+            else:
+                unknown_codes.add(code)
+        
+        # Print statistics
+        print(f"  Modality '{modality_name}': {matched_codes}/{total_codes} codes matched in vocabulary")
+        if unknown_codes:
+            print(f"  WARNING: {len(unknown_codes)} unique codes not found in vocabulary")
+            if len(unknown_codes) <= 10:
+                print(f"  Unknown codes: {sorted(list(unknown_codes))}")
+            else:
+                print(f"  First 10 unknown codes: {sorted(list(unknown_codes))[:10]}")
     
     return patients_bow
 
@@ -151,12 +176,24 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
     )
     
     if not patients_bow:
-        print("Warning: No valid patient data found in provided files.")
+        print("ERROR: No valid patient data found in provided files.")
+        print("Possible issues:")
+        print("  1. No codes matched the vocabulary")
+        print("  2. Vocabulary mapping files are missing")
+        print("  3. Code column name is incorrect (use --word-column if not 'code')")
         return pd.DataFrame(columns=['patient_id'])
+    
+    print(f"\nProcessing {len(patients_bow)} patients for inference...")
     
     # Infer theta for each patient using FAST inference method
     results = []
     for patient_id, bow in patients_bow.items():
+        # Check if patient has any data
+        has_data = any(len(bow_m) > 0 for bow_m in bow)
+        if not has_data:
+            print(f"WARNING: Patient {patient_id} has no valid codes after vocabulary matching")
+            continue
+            
         theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
