@@ -105,7 +105,36 @@ optional arguments:
   --explain-output      Output file for explanations (default: patient_explanations.txt)
   --explain-top-topics  Number of top topics in explanations (default: 5)
   --explain-top-codes   Number of top codes per topic (default: 10)
+  --phi-csv-icd         External phi CSV for ICD modality (e.g., UKB_phi_icd.csv)
+  --phi-csv-med         External phi CSV for medication modality  
+  --phi-csv-opcs        External phi CSV for OPCS modality
 ```
+
+### Using External Phi Distributions
+
+You can use pre-computed phi (word-topic probability) matrices from CSV files instead of the phi learned during training. This is useful when you have phi distributions from external sources or different trained models:
+
+```bash
+# Infer with external phi from CSV files
+python infer_patient.py ./results/ --icd ./patient_icd.csv \
+  --phi-csv-icd UKB_phi_icd.csv \
+  --output theta.csv
+
+# Multiple modalities with external phi
+python infer_patient.py ./results/ \
+  --icd ./icd.csv \
+  --med ./med.csv \
+  --phi-csv-icd UKB_phi_icd.csv \
+  --phi-csv-med UKB_phi_med.csv \
+  --output theta.csv
+```
+
+**External Phi Format:**
+- CSV files with no header
+- Each row is a word/code (in vocabulary order)
+- Each column is a topic  
+- Values are probabilities (summing to 1 for each topic)
+- Example: `UKB_phi_icd.csv` has shape `(V_icd, K)` where V_icd is ICD vocabulary size and K is number of topics
 
 ### ChatGPT Explanations
 
@@ -209,6 +238,25 @@ patients = [
     {'icd': {0: 1}, 'med': {15: 1}, 'opcs': {3: 1}}  # Patient 3: all modalities
 ]
 thetas = model.infer_theta_batch_by_modality(patients, num_iterations=5)
+
+# --- INFERENCE WITH EXTERNAL PHI DISTRIBUTIONS ---
+
+# Load phi distributions from external CSV files (e.g., from another trained model)
+phi_dists = MixEHR_SAGE.load_phi_from_csv({
+    'icd': 'UKB_phi_icd.csv',
+    'med': 'UKB_phi_med.csv',
+    'opcs': 'UKB_phi_opcs.csv'
+}, ['icd', 'med', 'opcs'])
+
+# Infer theta using external phi instead of model's learned phi
+theta = model.infer_theta_with_external_phi(
+    {'icd': {0: 1, 5: 2}},
+    phi_dists,
+    num_iterations=10
+)
+
+# This allows you to use pre-computed phi matrices from different sources
+# without retraining the model
 ```
 
 # Dynamic Modality Support

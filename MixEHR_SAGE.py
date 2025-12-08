@@ -751,4 +751,158 @@ class MixEHR_SAGE(nn.Module):
             theta = self.infer_theta_fast(patient_bow, num_iterations)
             thetas.append(theta)
         return torch.stack(thetas)
+    
+    @staticmethod
+    def load_phi_from_csv(phi_csv_paths, modalities):
+        """
+        Load phi distributions from external CSV files.
+        
+        This method allows you to load pre-computed phi (word-topic probability) matrices
+        from CSV files instead of training a model. Useful when you have pre-trained
+        phi distributions from external sources (e.g., UKB_phi_icd.csv).
+        
+        Args:
+            phi_csv_paths: dict mapping modality name to CSV file path
+                          e.g., {'icd': 'UKB_phi_icd.csv', 'med': 'UKB_phi_med.csv'}
+                          OR a single string path if only one modality
+            modalities: list of modality names in order (e.g., ['icd', 'med', 'opcs'])
+        
+        Returns:
+            phi_distributions: list of tensors, one per modality [V_m x K]
+        
+        Example:
+            phi_dists = MixEHR_SAGE.load_phi_from_csv({
+                'icd': 'UKB_phi_icd.csv',
+                'med': 'UKB_phi_med.csv',
+                'opcs': 'UKB_phi_opcs.csv'
+            }, ['icd', 'med', 'opcs'])
+        """
+        import pandas as pd
+        
+        # Handle single path string
+        if isinstance(phi_csv_paths, str):
+            phi_csv_paths = {modalities[0]: phi_csv_paths}
+        
+        phi_distributions = []
+        for modality in modalities:
+            if modality in phi_csv_paths:
+                csv_path = phi_csv_paths[modality]
+                print(f"Loading phi for {modality} from {csv_path}")
+                
+                # Load CSV
+                df = pd.read_csv(csv_path, header=None)
+                phi_np = df.values
+                phi_tensor = torch.tensor(phi_np, dtype=torch.double, device=device)
+                phi_distributions.append(phi_tensor)
+                print(f"  Loaded phi shape: {phi_tensor.shape} (V={phi_tensor.shape[0]}, K={phi_tensor.shape[1]})")
+            else:
+                print(f"Warning: No phi CSV provided for modality '{modality}', skipping")
+                phi_distributions.append(None)
+        
+        return phi_distributions
+    
+    def infer_theta_with_external_phi(self, patient_data, phi_distributions, phi_seed=None, num_iterations=10):
+        """
+        Infer theta for a new patient using externally provided phi distributions.
+        
+        This method allows you to use pre-computed phi matrices from CSV files
+        instead of the phi learned during training. Useful for inference with
+        different trained models or external phi sources.
+        
+        Args:
+            patient_data: dict mapping modality name to {word_id: frequency}
+                         e.g., {'icd': {0: 1, 5: 2}, 'med': {10: 1}}
+            phi_distributions: list of tensors from load_phi_from_csv(), one per modality
+            phi_seed: optional seed phi tensor for guided modality (if None, uses phi_distributions[guided_modality])
+            num_iterations: number of variational inference iterations (default: 10)
+        
+        Returns:
+            theta: K-dimensional tensor representing patient's topic mixture (risk profile)
+        
+        Example:
+            # Load external phi from CSV
+            phi_dists = MixEHR_SAGE.load_phi_from_csv({
+                'icd': 'UKB_phi_icd.csv',
+                'med': 'UKB_phi_med.csv'
+            }, ['icd', 'med', 'opcs'])
+            
+            # Infer theta using external phi
+            theta = model.infer_theta_with_external_phi(
+                {'icd': {0: 1, 5: 2}},
+                phi_dists
+            )
+        """
+        # Get K from phi distributions
+        K = None
+        for phi in phi_distributions:
+            if phi is not None:
+                K = phi.shape[1]
+                break
+        
+        if K is None:
+            raise ValueError("No valid phi distributions provided")
+        
+        # Initialize theta uniformly
+        theta = torch.ones(K, dtype=torch.double, device=device) / K
+        
+        # Build patient bow list
+        patient_bow_list = []
+        for m, modality in enumerate(self.modalities):
+            if modality in patient_data:
+                patient_bow_list.append(patient_data[modality])
+            else:
+                patient_bow_list.append({})
+        
+        # Variational inference iterations
+        for _ in range(num_iterations):
+            exp_topic_counts = torch.zeros(K, dtype=torch.double, device=device)
+            
+            for m in range(len(patient_bow_list)):
+                bow_m = patient_bow_list[m]
+                if not bow_m or phi_distributions[m] is None:
+                    continue
+                
+                # Collect word ids and frequencies
+                word_ids = []
+                freqs = []
+                for word_id, freq in bow_m.items():
+                    if word_id < phi_distributions[m].shape[0]:
+                        word_ids.append(word_id)
+                        freqs.append(freq)
+                
+                if not word_ids:
+                    continue
+                
+                word_ids_t = torch.tensor(word_ids, device=device)
+                freqs_t = torch.tensor(freqs, dtype=torch.double, device=device)
+                
+                # Get phi for these words
+                if m == self.guided_modality and phi_seed is not None:
+                    # Use seed-guided inference if phi_seed provided
+                    is_seed = self.seeds_topic_matrix[word_ids_t]  # (num_words, K)
+                    phi_regular = phi_distributions[m][word_ids_t]  # (num_words, K)
+                    phi_s = phi_seed[word_ids_t]  # (num_words, K)
+                    
+                    # gamma = theta * [is_seed * pi * phi_seed + (1 - is_seed * pi) * phi_regular]
+                    gamma = theta.unsqueeze(0) * (is_seed * self.pi * phi_s + 
+                                                   (1 - is_seed * self.pi) * phi_regular)
+                else:
+                    # Standard LDA inference
+                    phi_words = phi_distributions[m][word_ids_t]  # (num_words, K)
+                    gamma = theta.unsqueeze(0) * phi_words
+                
+                # Normalize each word's gamma
+                gamma = gamma / (gamma.sum(dim=1, keepdim=True) + mini_val)
+                
+                # Accumulate weighted by frequency
+                exp_topic_counts += (gamma * freqs_t.unsqueeze(1)).sum(dim=0)
+            
+            # Update theta
+            if exp_topic_counts.sum() > 0:
+                theta = (exp_topic_counts + self.eta) / (exp_topic_counts.sum() + K * self.eta)
+            else:
+                # If no valid words, keep uniform distribution
+                theta = torch.ones(K, dtype=torch.double, device=device) / K
+        
+        return theta
 

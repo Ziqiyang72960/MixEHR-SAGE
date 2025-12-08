@@ -177,7 +177,7 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
 
 
 def infer_from_modality_files(model, modality_files, vocab_mappings, modality_list,
-                               word_column='code', num_iterations=10, return_bow=False):
+                               word_column='code', num_iterations=10, return_bow=False, external_phi=None):
     """
     Infer theta for patients from separate modality files.
     
@@ -189,6 +189,7 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         word_column: column name for codes
         num_iterations: VI iterations
         return_bow: if True, also return patients_bow dict
+        external_phi: optional list of external phi distributions from CSV files
     
     Returns:
         DataFrame with patient_id and theta values
@@ -211,7 +212,7 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
     
     print(f"\nProcessing {len(patients_bow)} patients for inference...")
     
-    # Infer theta for each patient using FAST inference method
+    # Infer theta for each patient
     results = []
     for patient_id, bow in patients_bow.items():
         # Check if patient has any data
@@ -219,8 +220,16 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         if not has_data:
             print(f"WARNING: Patient {patient_id} has no valid codes after vocabulary matching")
             continue
+        
+        # Convert bow list to dict format for external phi method
+        patient_data = {modality: bow[m] for m, modality in enumerate(modality_list)}
+        
+        # Use external phi if provided, otherwise use model's trained phi
+        if external_phi is not None:
+            theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
+        else:
+            theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
             
-        theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
         for k in range(len(theta_np)):
@@ -233,7 +242,7 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
 
 
 def infer_from_file(model, patient_file, vocab_mappings, modality_list, 
-                    word_column='code', num_iterations=10, return_bow=False):
+                    word_column='code', num_iterations=10, return_bow=False, external_phi=None):
     """
     Infer theta for patients from a data file.
     
@@ -245,6 +254,7 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         word_column: column name for codes
         num_iterations: VI iterations
         return_bow: if True, also return patients_bow dict
+        external_phi: optional list of external phi distributions from CSV files
     
     Returns:
         DataFrame with patient_id and theta values
@@ -258,11 +268,18 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         patient_df, vocab_mappings, modality_list, word_column
     )
     
-    # Infer theta for each patient using FAST inference method
+    # Infer theta for each patient
     results = []
     for patient_id, bow in patients_bow.items():
-        # Use fast inference with cached phi distributions
-        theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
+        # Convert bow list to dict format for external phi method
+        patient_data = {modality: bow[m] for m, modality in enumerate(modality_list)}
+        
+        # Use external phi if provided, otherwise use model's trained phi
+        if external_phi is not None:
+            theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
+        else:
+            theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
+            
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
         for k in range(len(theta_np)):
@@ -561,6 +578,21 @@ Input Data Format:
         default=10,
         help='Number of top codes per topic to include in explanations (default: 10)'
     )
+    parser.add_argument(
+        '--phi-csv-icd',
+        default=None,
+        help='External phi CSV file for ICD modality (e.g., UKB_phi_icd.csv). Use this to infer with pre-computed phi instead of trained model phi.'
+    )
+    parser.add_argument(
+        '--phi-csv-med',
+        default=None,
+        help='External phi CSV file for medication modality (e.g., UKB_phi_med.csv)'
+    )
+    parser.add_argument(
+        '--phi-csv-opcs',
+        default=None,
+        help='External phi CSV file for OPCS modality (e.g., UKB_phi_opcs.csv)'
+    )
     
     args = parser.parse_args()
     
@@ -600,6 +632,21 @@ Input Data Format:
     vocab_mappings = load_vocab_mappings(args.mapping)
     print(f"Loaded vocabulary mappings for: {list(vocab_mappings.keys())}")
     
+    # Check if external phi CSVs are provided
+    external_phi = None
+    phi_csv_files = {}
+    if args.phi_csv_icd:
+        phi_csv_files['icd'] = args.phi_csv_icd
+    if args.phi_csv_med:
+        phi_csv_files['med'] = args.phi_csv_med
+    if args.phi_csv_opcs:
+        phi_csv_files['opcs'] = args.phi_csv_opcs
+    
+    if phi_csv_files:
+        print(f"\nLoading external phi distributions from CSV files...")
+        external_phi = MixEHR_SAGE.load_phi_from_csv(phi_csv_files, modality_list)
+        print(f"External phi loaded for: {[m for m, phi in zip(modality_list, external_phi) if phi is not None]}")
+    
     # Determine which mode to use: separate modality files or single file
     modality_files = {}
     if args.icd:
@@ -622,7 +669,8 @@ Input Data Format:
                 modality_list,
                 word_column=args.word_column,
                 num_iterations=args.iterations,
-                return_bow=True
+                return_bow=True,
+                external_phi=external_phi
             )
         else:
             results_df = infer_from_modality_files(
@@ -631,7 +679,8 @@ Input Data Format:
                 vocab_mappings, 
                 modality_list,
                 word_column=args.word_column,
-                num_iterations=args.iterations
+                num_iterations=args.iterations,
+                external_phi=external_phi
             )
     elif args.data:
         # Use single data file
@@ -647,7 +696,8 @@ Input Data Format:
                 modality_list,
                 word_column=args.word_column,
                 num_iterations=args.iterations,
-                return_bow=True
+                return_bow=True,
+                external_phi=external_phi
             )
         else:
             results_df = infer_from_file(
@@ -656,7 +706,8 @@ Input Data Format:
                 vocab_mappings, 
                 modality_list,
                 word_column=args.word_column,
-                num_iterations=args.iterations
+                num_iterations=args.iterations,
+                external_phi=external_phi
             )
     else:
         print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
