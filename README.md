@@ -85,7 +85,9 @@ python infer_patient.py ./results/ --icd ./icd.csv -o theta.csv --top-k 5
 ```
 usage: infer_patient.py [-h] [--data DATA] [--icd ICD] [--med MED] [--opcs OPCS]
                         [--output OUTPUT] [--corpus CORPUS] [--iterations ITERATIONS]
-                        [--top-k TOP_K] model_path
+                        [--top-k TOP_K] [--explain] [--explain-output EXPLAIN_OUTPUT]
+                        [--explain-top-topics N] [--explain-top-codes N]
+                        model_path
 
 positional arguments:
   model_path            Path to trained model directory (results folder)
@@ -99,7 +101,32 @@ optional arguments:
   --corpus, -c          Path to corpus directory (default: ./store/)
   --iterations, -i      Number of VI iterations (default: 10)
   --top-k, -k           Output only top-k topics per patient
+  --explain             Generate ChatGPT explanation prompts
+  --explain-output      Output file for explanations (default: patient_explanations.txt)
+  --explain-top-topics  Number of top topics in explanations (default: 5)
+  --explain-top-codes   Number of top codes per topic (default: 10)
 ```
+
+### ChatGPT Explanations
+
+Generate detailed explanation prompts for ChatGPT to interpret patient phenotype probabilities:
+
+```bash
+# Generate explanations with inference
+python infer_patient.py ./results/ --icd ./patient_icd.csv \
+  --explain --explain-output explanations.txt
+
+# Customize number of topics and codes in explanations
+python infer_patient.py ./results/ --icd ./icd.csv \
+  --explain --explain-top-topics 3 --explain-top-codes 15
+```
+
+The generated prompts include:
+1. **Top K inferred topic mixtures** - Patient's probability distribution over phenotypes
+2. **Patient medical records** - Actual codes observed for the patient
+3. **Top codes for each topic** - Most probable codes defining each phenotype (based on φ)
+
+Copy the generated prompts to ChatGPT for human-readable explanations of the patient's risk profile.
 
 ## Input Data Format
 

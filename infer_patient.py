@@ -177,7 +177,7 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
 
 
 def infer_from_modality_files(model, modality_files, vocab_mappings, modality_list,
-                               word_column='code', num_iterations=10):
+                               word_column='code', num_iterations=10, return_bow=False):
     """
     Infer theta for patients from separate modality files.
     
@@ -188,9 +188,11 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         modality_list: list of modality names
         word_column: column name for codes
         num_iterations: VI iterations
+        return_bow: if True, also return patients_bow dict
     
     Returns:
         DataFrame with patient_id and theta values
+        (optionally) dict of patients_bow if return_bow=True
     """
     # Convert to BOW format
     patients_bow = convert_modality_files_to_bow(
@@ -203,6 +205,8 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         print("  1. No codes matched the vocabulary")
         print("  2. Vocabulary mapping files are missing")
         print("  3. Code column name is incorrect (use --word-column if not 'code')")
+        if return_bow:
+            return pd.DataFrame(columns=['patient_id']), {}
         return pd.DataFrame(columns=['patient_id'])
     
     print(f"\nProcessing {len(patients_bow)} patients for inference...")
@@ -223,11 +227,13 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
             result[f'topic_{k}'] = theta_np[k]
         results.append(result)
     
+    if return_bow:
+        return pd.DataFrame(results), patients_bow
     return pd.DataFrame(results)
 
 
 def infer_from_file(model, patient_file, vocab_mappings, modality_list, 
-                    word_column='code', num_iterations=10):
+                    word_column='code', num_iterations=10, return_bow=False):
     """
     Infer theta for patients from a data file.
     
@@ -238,9 +244,11 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         modality_list: list of modality names
         word_column: column name for codes
         num_iterations: VI iterations
+        return_bow: if True, also return patients_bow dict
     
     Returns:
         DataFrame with patient_id and theta values
+        (optionally) dict of patients_bow if return_bow=True
     """
     # Read patient data
     patient_df = read_data_file(patient_file)
@@ -261,7 +269,125 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
             result[f'topic_{k}'] = theta_np[k]
         results.append(result)
     
+    if return_bow:
+        return pd.DataFrame(results), patients_bow
     return pd.DataFrame(results)
+
+
+def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, vocab_mappings, 
+                                         modality_list, top_k_topics=5, top_n_codes=10):
+    """
+    Generate a ChatGPT prompt to explain inferred phenotype probabilities for a patient.
+    
+    Args:
+        patient_id: patient identifier
+        patient_bow: patient's bag-of-words data (list of dicts for each modality)
+        theta: inferred topic mixture (K-dimensional tensor or array)
+        model: trained MixEHR_SAGE model
+        vocab_mappings: dict of {modality: {code: word_id}}
+        modality_list: list of modality names
+        top_k_topics: number of top topics to include (default: 5)
+        top_n_codes: number of top codes per topic to include (default: 10)
+    
+    Returns:
+        str: formatted ChatGPT prompt
+    """
+    # Convert theta to numpy if needed
+    if torch.is_tensor(theta):
+        theta_np = theta.cpu().numpy()
+    else:
+        theta_np = np.array(theta)
+    
+    # Get top K topics
+    top_topic_indices = np.argsort(theta_np)[::-1][:top_k_topics]
+    top_topic_probs = theta_np[top_topic_indices]
+    
+    # Create reverse vocabulary mappings (word_id -> code)
+    reverse_vocabs = {}
+    for modality, vocab in vocab_mappings.items():
+        reverse_vocabs[modality] = {word_id: code for code, word_id in vocab.items()}
+    
+    # Get patient records by modality
+    patient_records_by_modality = {}
+    for m, modality_name in enumerate(modality_list):
+        if modality_name not in vocab_mappings:
+            continue
+        codes = []
+        for word_id, freq in patient_bow[m].items():
+            if word_id in reverse_vocabs[modality_name]:
+                code = reverse_vocabs[modality_name][word_id]
+                codes.extend([code] * freq)
+        if codes:
+            patient_records_by_modality[modality_name] = codes
+    
+    # Get top codes for each of the top K topics based on phi
+    topic_top_codes = {}
+    for topic_idx in top_topic_indices:
+        topic_codes_by_modality = {}
+        
+        for m, modality_name in enumerate(modality_list):
+            if modality_name not in vocab_mappings:
+                continue
+                
+            # Get phi for this modality
+            phi = model.get_phi(modality=m)  # V x K matrix
+            phi_np = phi.cpu().numpy()
+            
+            # Get top N codes for this topic in this modality
+            topic_phi = phi_np[:, topic_idx]
+            top_code_indices = np.argsort(topic_phi)[::-1][:top_n_codes]
+            top_codes_info = []
+            
+            for code_idx in top_code_indices:
+                if code_idx in reverse_vocabs[modality_name]:
+                    code = reverse_vocabs[modality_name][code_idx]
+                    prob = topic_phi[code_idx]
+                    top_codes_info.append(f"{code} (φ={prob:.4f})")
+            
+            if top_codes_info:
+                topic_codes_by_modality[modality_name] = top_codes_info
+        
+        topic_top_codes[topic_idx] = topic_codes_by_modality
+    
+    # Build the prompt
+    prompt = f"""I have a patient (ID: {patient_id}) and I used a topic modeling approach (MixEHR-SAGE) to infer their phenotype risk profile. Please help me interpret the results.
+
+**Input 1: Top {top_k_topics} Inferred Topic Mixtures (θ)**
+These represent the patient's probability distribution over latent phenotypes/disease topics:
+"""
+    
+    for i, (topic_idx, prob) in enumerate(zip(top_topic_indices, top_topic_probs), 1):
+        prompt += f"\n  Topic {topic_idx}: {prob:.4f} ({prob*100:.2f}%)"
+    
+    prompt += "\n\n**Input 2: Patient's Medical Records**\n"
+    prompt += "The actual medical codes observed for this patient:\n"
+    
+    for modality_name, codes in patient_records_by_modality.items():
+        unique_codes = list(set(codes))
+        if len(unique_codes) > 20:
+            prompt += f"\n  {modality_name.upper()}: {', '.join(unique_codes[:20])} ... ({len(unique_codes)} total unique codes)"
+        else:
+            prompt += f"\n  {modality_name.upper()}: {', '.join(unique_codes)}"
+    
+    prompt += "\n\n**Input 3: Top Codes for Each Topic (φ)**\n"
+    prompt += f"These are the top {top_n_codes} most probable codes for each of the patient's dominant topics:\n"
+    
+    for topic_idx in top_topic_indices:
+        prompt += f"\n  Topic {topic_idx} (probability {theta_np[topic_idx]:.4f}):"
+        if topic_idx in topic_top_codes:
+            for modality_name, codes_info in topic_top_codes[topic_idx].items():
+                prompt += f"\n    {modality_name.upper()}: {', '.join(codes_info)}"
+        else:
+            prompt += "\n    (No significant codes)"
+    
+    prompt += "\n\n**Question:**"
+    prompt += "\nBased on these three pieces of information, please explain:"
+    prompt += "\n1. What phenotypes or disease patterns do the top topics likely represent?"
+    prompt += "\n2. How well does the patient's actual medical history align with their inferred topic mixtures?"
+    prompt += "\n3. What insights can we draw about this patient's health condition and risk profile?"
+    prompt += "\n4. Are there any surprising findings or inconsistencies that warrant further investigation?"
+    
+    return prompt
 
 
 def main():
@@ -360,6 +486,28 @@ Input Data Format:
         default=None,
         help='Only output top-k topics per patient (default: all)'
     )
+    parser.add_argument(
+        '--explain',
+        action='store_true',
+        help='Generate ChatGPT explanation prompts for each patient'
+    )
+    parser.add_argument(
+        '--explain-output',
+        default='patient_explanations.txt',
+        help='Output file for ChatGPT explanation prompts (default: patient_explanations.txt)'
+    )
+    parser.add_argument(
+        '--explain-top-topics',
+        type=int,
+        default=5,
+        help='Number of top topics to include in explanations (default: 5)'
+    )
+    parser.add_argument(
+        '--explain-top-codes',
+        type=int,
+        default=10,
+        help='Number of top codes per topic to include in explanations (default: 10)'
+    )
     
     args = parser.parse_args()
     
@@ -409,31 +557,54 @@ Input Data Format:
         modality_files['opcs'] = args.opcs
     
     # Check if we have modality-specific files or a single data file
+    patients_bow = None
     if modality_files:
         # Use separate modality files
         print(f"Using separate modality files: {modality_files}")
-        results_df = infer_from_modality_files(
-            model, 
-            modality_files, 
-            vocab_mappings, 
-            modality_list,
-            word_column=args.word_column,
-            num_iterations=args.iterations
-        )
+        if args.explain:
+            results_df, patients_bow = infer_from_modality_files(
+                model, 
+                modality_files, 
+                vocab_mappings, 
+                modality_list,
+                word_column=args.word_column,
+                num_iterations=args.iterations,
+                return_bow=True
+            )
+        else:
+            results_df = infer_from_modality_files(
+                model, 
+                modality_files, 
+                vocab_mappings, 
+                modality_list,
+                word_column=args.word_column,
+                num_iterations=args.iterations
+            )
     elif args.data:
         # Use single data file
         if not os.path.exists(args.data):
             print(f"Error: Patient data file '{args.data}' does not exist.")
             sys.exit(1)
         print(f"Inferring theta for patients in {args.data}...")
-        results_df = infer_from_file(
-            model, 
-            args.data, 
-            vocab_mappings, 
-            modality_list,
-            word_column=args.word_column,
-            num_iterations=args.iterations
-        )
+        if args.explain:
+            results_df, patients_bow = infer_from_file(
+                model, 
+                args.data, 
+                vocab_mappings, 
+                modality_list,
+                word_column=args.word_column,
+                num_iterations=args.iterations,
+                return_bow=True
+            )
+        else:
+            results_df = infer_from_file(
+                model, 
+                args.data, 
+                vocab_mappings, 
+                modality_list,
+                word_column=args.word_column,
+                num_iterations=args.iterations
+            )
     else:
         print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
         sys.exit(1)
@@ -475,6 +646,50 @@ Input Data Format:
             print(f"  {col}: mean={results_df[col].mean():.4f}, std={results_df[col].std():.4f}")
         if len(topic_cols) > 5:
             print(f"  ... and {len(topic_cols) - 5} more topics")
+    
+    # Generate ChatGPT explanation prompts if requested
+    if args.explain and patients_bow is not None:
+        print(f"\nGenerating ChatGPT explanation prompts...")
+        explanations = []
+        
+        for _, row in results_df.iterrows():
+            patient_id = row['patient_id']
+            if patient_id not in patients_bow:
+                continue
+            
+            # Extract theta from row
+            theta_values = [row[col] for col in topic_cols]
+            theta = np.array(theta_values)
+            
+            # Generate prompt
+            prompt = generate_chatgpt_explanation_prompt(
+                patient_id=patient_id,
+                patient_bow=patients_bow[patient_id],
+                theta=theta,
+                model=model,
+                vocab_mappings=vocab_mappings,
+                modality_list=modality_list,
+                top_k_topics=args.explain_top_topics,
+                top_n_codes=args.explain_top_codes
+            )
+            
+            explanations.append({
+                'patient_id': patient_id,
+                'prompt': prompt
+            })
+        
+        # Save explanations to file
+        with open(args.explain_output, 'w') as f:
+            for i, expl in enumerate(explanations):
+                if i > 0:
+                    f.write("\n\n" + "="*80 + "\n\n")
+                f.write(f"Patient ID: {expl['patient_id']}\n")
+                f.write("="*80 + "\n\n")
+                f.write(expl['prompt'])
+        
+        print(f"Generated {len(explanations)} explanation prompts")
+        print(f"Explanations saved to {args.explain_output}")
+        print(f"\nYou can copy these prompts and paste them into ChatGPT for detailed explanations.")
 
 
 if __name__ == "__main__":
