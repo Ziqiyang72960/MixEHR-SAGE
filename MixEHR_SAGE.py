@@ -789,8 +789,8 @@ class MixEHR_SAGE(nn.Module):
                 csv_path = phi_csv_paths[modality]
                 print(f"Loading phi for {modality} from {csv_path}")
                 
-                # Load CSV
-                df = pd.read_csv(csv_path, header=None)
+                # Load CSV with dtype=float to avoid mixed type warnings
+                df = pd.read_csv(csv_path, header=None, dtype=float, low_memory=False)
                 phi_np = df.values
                 phi_tensor = torch.tensor(phi_np, dtype=torch.double, device=device)
                 phi_distributions.append(phi_tensor)
