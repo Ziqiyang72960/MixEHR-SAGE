@@ -362,21 +362,24 @@ class MixEHR_SAGE(nn.Module):
         torch.save(self.exp_s, "results/toy_exp_s_%s.pt" % (epoch))
         torch.save(self.pi, "results/toy_pi_%s.pt" % (epoch))
 
-    def infer_theta(self, patient_bow, num_iterations=10):
+    def infer_theta(self, patient_bow, num_iterations=10, method='gibbs'):
         """
         Fast online inference for new patient's topic mixture (theta/risk).
         
-        This implements LDA-style "folding-in" inference using Gibbs sampling.
-        Uses the LEARNED phi (word-topic distributions) from training to infer 
-        the topic mixture (theta) for new patients.
+        This implements LDA-style "folding-in" inference using either Gibbs sampling 
+        or Variational Bayes. Uses the LEARNED phi (word-topic distributions) from 
+        training to infer the topic mixture (theta) for new patients.
         
-        The inference follows Gibbs sampling:
+        Gibbs sampling:
         1. Initialize topic assignments for each word token randomly
         2. For each iteration, resample topic for each word token based on:
            P(z_i = k | z_{-i}, w, phi) ∝ n_{k,−i} * phi_{w,k}
-           where n_{k,−i} is the topic count excluding current token
-           and phi_{w,k} is the LEARNED word-topic probability P(w|topic k)
         3. Compute theta from final topic counts
+        
+        Variational Bayes:
+        1. For each word w, compute topic assignment probability: gamma_wk ∝ theta_k * phi_wk
+        2. Update theta based on expected topic counts
+        3. Repeat for num_iterations
         
         For the guided modality (ICD codes), we use both:
         - phi_regular: learned from exp_n (regular word-topic distribution)
@@ -385,7 +388,8 @@ class MixEHR_SAGE(nn.Module):
         Args:
             patient_bow: dict of {modality_index: {word_id: frequency}} for each modality
                         or list of dicts, one per modality
-            num_iterations: number of Gibbs sampling iterations (default: 10)
+            num_iterations: number of inference iterations (default: 10)
+            method: inference method - 'gibbs' (default) or 'variational'
         
         Returns:
             theta: K-dimensional tensor representing patient's topic mixture (risk profile)
@@ -410,6 +414,24 @@ class MixEHR_SAGE(nn.Module):
         # phi_seed[w, k] = P(word w | topic k) for seed words
         phi_seed = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
         
+        if method.lower() == 'variational':
+            return self._infer_theta_variational(patient_bow, phi, phi_seed, num_iterations)
+        else:  # Default to Gibbs sampling
+            return self._infer_theta_gibbs(patient_bow, phi, phi_seed, num_iterations)
+    
+    def _infer_theta_gibbs(self, patient_bow, phi, phi_seed, num_iterations):
+        """
+        Gibbs sampling inference for theta.
+        
+        Args:
+            patient_bow: list of dicts, one per modality
+            phi: list of phi matrices for each modality
+            phi_seed: seed phi matrix for guided modality
+            num_iterations: number of Gibbs sampling iterations
+        
+        Returns:
+            theta: K-dimensional tensor
+        """
         # Create a list of word tokens (modality, word_id) and initialize topic assignments
         word_tokens = []  # List of (modality_idx, word_id)
         topic_assignments = []  # Topic assignment for each token
@@ -472,21 +494,79 @@ class MixEHR_SAGE(nn.Module):
         theta = (topic_counts + self.eta) / (topic_counts.sum() + self.K * self.eta)
         
         return theta
+    
+    def _infer_theta_variational(self, patient_bow, phi, phi_seed, num_iterations):
+        """
+        Variational Bayes inference for theta.
+        
+        Args:
+            patient_bow: list of dicts, one per modality
+            phi: list of phi matrices for each modality
+            phi_seed: seed phi matrix for guided modality
+            num_iterations: number of variational inference iterations
+        
+        Returns:
+            theta: K-dimensional tensor
+        """
+        # Initialize theta with Dirichlet prior (uniform + alpha)
+        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
+        
+        # Variational inference iterations (folding-in)
+        for iteration in range(num_iterations):
+            # Accumulate expected topic counts for this document
+            exp_topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
+            
+            for m in range(min(len(patient_bow), self.modaltiy_num)):
+                bow_m = patient_bow[m]
+                if not bow_m:
+                    continue
+                    
+                for word_id, freq in bow_m.items():
+                    if word_id >= self.V[m]:
+                        continue  # Skip unknown words
+                    
+                    if m == self.guided_modality:
+                        # For guided modality (ICD), use seed-guided inference
+                        # Check if this word is a seed word for any topic
+                        is_seed = self.seeds_topic_matrix[word_id]  # K-dim: 1 if seed for topic k, 0 otherwise
+                        
+                        # gamma_k ∝ theta_k * [pi_k * phi_seed_wk + (1-pi_k) * phi_regular_wk] for seed words
+                        # gamma_k ∝ theta_k * phi_regular_wk for non-seed words
+                        gamma_seed = is_seed * theta * phi_seed[word_id] * self.pi
+                        gamma_regular = theta * phi[m][word_id] * (1 - self.pi * is_seed)
+                        gamma = gamma_seed + gamma_regular
+                    else:
+                        # For unguided modality, standard LDA inference
+                        # gamma_k ∝ theta_k * phi_wk
+                        gamma = theta * phi[m][word_id]
+                    
+                    # Normalize to get topic assignment probabilities
+                    gamma = gamma / (gamma.sum() + mini_val)
+                    
+                    # Accumulate expected counts (weighted by word frequency)
+                    exp_topic_counts += gamma * freq
+            
+            # Update theta using variational update
+            # theta_k ∝ alpha + sum_w (gamma_wk * n_w)
+            theta = (exp_topic_counts + self.eta) / (exp_topic_counts.sum() + self.K * self.eta)
+        
+        return theta
 
-    def infer_theta_batch(self, patients_bow_list, num_iterations=10):
+    def infer_theta_batch(self, patients_bow_list, num_iterations=10, method='gibbs'):
         """
         Batch inference for multiple new patients' topic mixtures (theta/risk).
         
         Args:
             patients_bow_list: list of patient_bow dicts (see infer_theta for format)
-            num_iterations: number of variational inference iterations (default: 10)
+            num_iterations: number of inference iterations (default: 10)
+            method: inference method - 'gibbs' (default) or 'variational'
         
         Returns:
             thetas: (num_patients, K) tensor of topic mixtures
         """
         thetas = []
         for patient_bow in patients_bow_list:
-            theta = self.infer_theta(patient_bow, num_iterations)
+            theta = self.infer_theta(patient_bow, num_iterations, method=method)
             thetas.append(theta)
         return torch.stack(thetas)
 
@@ -602,7 +682,7 @@ class MixEHR_SAGE(nn.Module):
         
         print("Cached phi distributions for fast inference")
 
-    def infer_theta_fast(self, patient_bow, num_iterations=5):
+    def infer_theta_fast(self, patient_bow, num_iterations=5, method='gibbs'):
         """
         Ultra-fast online inference for new patient's topic mixture (theta/risk).
         
@@ -620,7 +700,8 @@ class MixEHR_SAGE(nn.Module):
                         Empty dicts {} for modalities without data.
                         Example with only ICD (modality 0): [{0: 1, 5: 2}, {}, {}]
                         Example with ICD + med: [{0: 1}, {10: 1, 15: 3}, {}]
-            num_iterations: number of variational inference iterations (default: 5)
+            num_iterations: number of inference iterations (default: 5)
+            method: inference method - 'gibbs' (default) or 'variational'
         
         Returns:
             theta: K-dimensional tensor representing patient's topic mixture (risk profile)
@@ -632,14 +713,22 @@ class MixEHR_SAGE(nn.Module):
         if not hasattr(self, '_phi_cached') or self._phi_cached is None:
             self._cache_phi_distributions()
         
-        # Initialize theta uniformly
-        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
-        
         # Convert patient_bow to list format if needed
         if isinstance(patient_bow, dict) and 0 not in patient_bow:
             patient_bow = [patient_bow]
         elif isinstance(patient_bow, dict):
             patient_bow = [patient_bow.get(m, {}) for m in range(self.modaltiy_num)]
+        
+        # Use the method-specific implementation with cached phi
+        if method.lower() == 'variational':
+            return self._infer_theta_fast_variational(patient_bow, num_iterations)
+        else:  # Default to Gibbs sampling
+            return self._infer_theta_fast_gibbs(patient_bow, num_iterations)
+    
+    def _infer_theta_fast_variational(self, patient_bow, num_iterations):
+        """Variational Bayes inference using cached phi."""
+        # Initialize theta uniformly
+        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
         
         # Variational inference iterations using cached phi
         for _ in range(num_iterations):
@@ -687,6 +776,57 @@ class MixEHR_SAGE(nn.Module):
             # Update theta
             theta = (exp_topic_counts + self.eta) / (exp_topic_counts.sum() + self.K * self.eta)
         
+        return theta
+    
+    def _infer_theta_fast_gibbs(self, patient_bow, num_iterations):
+        """Gibbs sampling inference using cached phi."""
+        # Create word tokens and initialize topic assignments
+        word_tokens = []
+        topic_assignments = []
+        
+        for m in range(min(len(patient_bow), self.modaltiy_num)):
+            bow_m = patient_bow[m]
+            if not bow_m:
+                continue
+                
+            for word_id, freq in bow_m.items():
+                if word_id >= self.V[m]:
+                    continue
+                for _ in range(int(freq)):
+                    word_tokens.append((m, word_id))
+                    topic_assignments.append(torch.randint(0, self.K, (1,), device=device).item())
+        
+        if len(word_tokens) == 0:
+            return torch.ones(self.K, dtype=torch.double, device=device) / self.K
+        
+        # Count initial topic assignments
+        topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
+        for topic in topic_assignments:
+            topic_counts[topic] += 1
+        
+        # Gibbs sampling iterations
+        for _ in range(num_iterations):
+            for token_idx, (m, word_id) in enumerate(word_tokens):
+                old_topic = topic_assignments[token_idx]
+                topic_counts[old_topic] -= 1
+                
+                # Get phi from cache
+                if m == self.guided_modality:
+                    is_seed = self.seeds_topic_matrix[word_id]
+                    phi_wk = (is_seed * self.pi * self._phi_seed_cached[word_id] + 
+                             (1 - is_seed * self.pi) * self._phi_cached[m][word_id])
+                else:
+                    phi_wk = self._phi_cached[m][word_id]
+                
+                # Sample new topic
+                prob = (topic_counts + self.eta) * phi_wk
+                prob = prob / (prob.sum() + mini_val)
+                new_topic = torch.multinomial(prob, 1).item()
+                topic_assignments[token_idx] = new_topic
+                topic_counts[new_topic] += 1
+        
+        # Compute final theta
+        theta = (topic_counts + self.eta) / (topic_counts.sum() + self.K * self.eta)
         return theta
 
     def infer_theta_by_modality(self, patient_data, num_iterations=5):

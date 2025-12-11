@@ -177,7 +177,7 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
 
 
 def infer_from_modality_files(model, modality_files, vocab_mappings, modality_list,
-                               word_column='code', num_iterations=10, return_bow=False, external_phi=None):
+                               word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs'):
     """
     Infer theta for patients from separate modality files.
     
@@ -187,9 +187,10 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         vocab_mappings: vocabulary mappings
         modality_list: list of modality names
         word_column: column name for codes
-        num_iterations: VI iterations
+        num_iterations: inference iterations
         return_bow: if True, also return patients_bow dict
         external_phi: optional list of external phi distributions from CSV files
+        method: inference method - 'gibbs' (default) or 'variational'
     
     Returns:
         DataFrame with patient_id and theta values
@@ -228,7 +229,7 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         if external_phi is not None:
             theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
         else:
-            theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
+            theta = model.infer_theta_fast(bow, num_iterations=num_iterations, method=method)
             
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
@@ -242,7 +243,7 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
 
 
 def infer_from_file(model, patient_file, vocab_mappings, modality_list, 
-                    word_column='code', num_iterations=10, return_bow=False, external_phi=None):
+                    word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs'):
     """
     Infer theta for patients from a data file.
     
@@ -252,9 +253,10 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         vocab_mappings: vocabulary mappings
         modality_list: list of modality names
         word_column: column name for codes
-        num_iterations: VI iterations
+        num_iterations: inference iterations
         return_bow: if True, also return patients_bow dict
         external_phi: optional list of external phi distributions from CSV files
+        method: inference method - 'gibbs' (default) or 'variational'
     
     Returns:
         DataFrame with patient_id and theta values
@@ -278,7 +280,7 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         if external_phi is not None:
             theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
         else:
-            theta = model.infer_theta_fast(bow, num_iterations=num_iterations)
+            theta = model.infer_theta_fast(bow, num_iterations=num_iterations, method=method)
             
         theta_np = theta.cpu().numpy()
         result = {'patient_id': patient_id}
@@ -548,7 +550,13 @@ Input Data Format:
         '--iterations', '-i',
         type=int,
         default=10,
-        help='Number of VI iterations for inference (default: 10)'
+        help='Number of inference iterations (default: 10)'
+    )
+    parser.add_argument(
+        '--method',
+        choices=['gibbs', 'variational'],
+        default='gibbs',
+        help='Inference method: gibbs (default) or variational (default: gibbs)'
     )
     parser.add_argument(
         '--top-k', '-k',
@@ -686,7 +694,8 @@ Input Data Format:
                 word_column=args.word_column,
                 num_iterations=args.iterations,
                 return_bow=True,
-                external_phi=external_phi
+                external_phi=external_phi,
+                method=args.method
             )
         else:
             results_df = infer_from_modality_files(
@@ -696,7 +705,8 @@ Input Data Format:
                 modality_list,
                 word_column=args.word_column,
                 num_iterations=args.iterations,
-                external_phi=external_phi
+                external_phi=external_phi,
+                method=args.method
             )
     elif args.data:
         # Use single data file
@@ -713,7 +723,8 @@ Input Data Format:
                 word_column=args.word_column,
                 num_iterations=args.iterations,
                 return_bow=True,
-                external_phi=external_phi
+                external_phi=external_phi,
+                method=args.method
             )
         else:
             results_df = infer_from_file(
@@ -723,7 +734,8 @@ Input Data Format:
                 modality_list,
                 word_column=args.word_column,
                 num_iterations=args.iterations,
-                external_phi=external_phi
+                external_phi=external_phi,
+                method=args.method
             )
     else:
         print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
