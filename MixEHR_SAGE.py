@@ -366,16 +366,17 @@ class MixEHR_SAGE(nn.Module):
         """
         Fast online inference for new patient's topic mixture (theta/risk).
         
-        This implements LDA-style "folding-in" inference using variational Bayes.
+        This implements LDA-style "folding-in" inference using Gibbs sampling.
         Uses the LEARNED phi (word-topic distributions) from training to infer 
         the topic mixture (theta) for new patients.
         
-        The inference follows these steps (variational E-step):
-        1. For each word w in the new document, compute the topic assignment 
-           probability: gamma_wk ∝ theta_k * phi_wk
-           where phi_wk is the LEARNED word-topic probability P(w|topic k)
-        2. Update theta based on the expected topic counts
-        3. Repeat for num_iterations
+        The inference follows Gibbs sampling:
+        1. Initialize topic assignments for each word token randomly
+        2. For each iteration, resample topic for each word token based on:
+           P(z_i = k | z_{-i}, w, phi) ∝ n_{k,−i} * phi_{w,k}
+           where n_{k,−i} is the topic count excluding current token
+           and phi_{w,k} is the LEARNED word-topic probability P(w|topic k)
+        3. Compute theta from final topic counts
         
         For the guided modality (ICD codes), we use both:
         - phi_regular: learned from exp_n (regular word-topic distribution)
@@ -384,14 +385,11 @@ class MixEHR_SAGE(nn.Module):
         Args:
             patient_bow: dict of {modality_index: {word_id: frequency}} for each modality
                         or list of dicts, one per modality
-            num_iterations: number of variational inference iterations (default: 10)
+            num_iterations: number of Gibbs sampling iterations (default: 10)
         
         Returns:
             theta: K-dimensional tensor representing patient's topic mixture (risk profile)
         """
-        # Initialize theta with Dirichlet prior (uniform + alpha)
-        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
-        
         # Convert patient_bow to list format if needed
         if isinstance(patient_bow, dict) and 0 not in patient_bow:
             # Single modality dict format
@@ -412,44 +410,66 @@ class MixEHR_SAGE(nn.Module):
         # phi_seed[w, k] = P(word w | topic k) for seed words
         phi_seed = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
         
-        # Variational inference iterations (folding-in)
+        # Create a list of word tokens (modality, word_id) and initialize topic assignments
+        word_tokens = []  # List of (modality_idx, word_id)
+        topic_assignments = []  # Topic assignment for each token
+        
+        for m in range(min(len(patient_bow), self.modaltiy_num)):
+            bow_m = patient_bow[m]
+            if not bow_m:
+                continue
+                
+            for word_id, freq in bow_m.items():
+                if word_id >= self.V[m]:
+                    continue  # Skip unknown words
+                # Add freq tokens for this word
+                for _ in range(int(freq)):
+                    word_tokens.append((m, word_id))
+                    # Initialize with random topic
+                    topic_assignments.append(torch.randint(0, self.K, (1,), device=device).item())
+        
+        if len(word_tokens) == 0:
+            # No valid words, return uniform distribution
+            return torch.ones(self.K, dtype=torch.double, device=device) / self.K
+        
+        # Count initial topic assignments
+        topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
+        for topic in topic_assignments:
+            topic_counts[topic] += 1
+        
+        # Gibbs sampling iterations
         for iteration in range(num_iterations):
-            # Accumulate expected topic counts for this document
-            exp_topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
-            
-            for m in range(min(len(patient_bow), self.modaltiy_num)):
-                bow_m = patient_bow[m]
-                if not bow_m:
-                    continue
+            for token_idx, (m, word_id) in enumerate(word_tokens):
+                # Remove current token's topic assignment
+                old_topic = topic_assignments[token_idx]
+                topic_counts[old_topic] -= 1
+                
+                # Compute sampling probability for each topic
+                # P(z_i = k) ∝ (n_{k,−i} + alpha) * phi_{w,k}
+                if m == self.guided_modality:
+                    # For guided modality (ICD), use seed-guided inference
+                    is_seed = self.seeds_topic_matrix[word_id]  # K-dim: 1 if seed for topic k, 0 otherwise
                     
-                for word_id, freq in bow_m.items():
-                    if word_id >= self.V[m]:
-                        continue  # Skip unknown words
-                    
-                    if m == self.guided_modality:
-                        # For guided modality (ICD), use seed-guided inference
-                        # Check if this word is a seed word for any topic
-                        is_seed = self.seeds_topic_matrix[word_id]  # K-dim: 1 if seed for topic k, 0 otherwise
-                        
-                        # gamma_k ∝ theta_k * [pi_k * phi_seed_wk + (1-pi_k) * phi_regular_wk] for seed words
-                        # gamma_k ∝ theta_k * phi_regular_wk for non-seed words
-                        gamma_seed = is_seed * theta * phi_seed[word_id] * self.pi
-                        gamma_regular = theta * phi[m][word_id] * (1 - self.pi * is_seed)
-                        gamma = gamma_seed + gamma_regular
-                    else:
-                        # For unguided modality, standard LDA inference
-                        # gamma_k ∝ theta_k * phi_wk
-                        gamma = theta * phi[m][word_id]
-                    
-                    # Normalize to get topic assignment probabilities
-                    gamma = gamma / (gamma.sum() + mini_val)
-                    
-                    # Accumulate expected counts (weighted by word frequency)
-                    exp_topic_counts += gamma * freq
-            
-            # Update theta using variational update
-            # theta_k ∝ alpha + sum_w (gamma_wk * n_w)
-            theta = (exp_topic_counts + self.eta) / (exp_topic_counts.sum() + self.K * self.eta)
+                    # Combine seed and regular phi
+                    phi_wk_seed = is_seed * phi_seed[word_id] * self.pi
+                    phi_wk_regular = phi[m][word_id] * (1 - self.pi * is_seed)
+                    phi_wk = phi_wk_seed + phi_wk_regular
+                else:
+                    # For unguided modality, standard LDA
+                    phi_wk = phi[m][word_id]
+                
+                # Sampling probability
+                prob = (topic_counts + self.eta) * phi_wk
+                prob = prob / (prob.sum() + mini_val)
+                
+                # Sample new topic assignment
+                new_topic = torch.multinomial(prob, 1).item()
+                topic_assignments[token_idx] = new_topic
+                topic_counts[new_topic] += 1
+        
+        # Compute final theta from topic counts
+        # theta_k = (n_k + alpha) / (N + K * alpha)
+        theta = (topic_counts + self.eta) / (topic_counts.sum() + self.K * self.eta)
         
         return theta
 
