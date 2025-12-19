@@ -691,25 +691,31 @@ def main():
     all_modalities = list(vocab_mappings.keys())
     print(f"Found vocabulary for modalities: {all_modalities}")
     
-    # Filter modalities to only those with trained model files
+    # Filter modalities to only those with trained model files in results directory
     print("\nFiltering modalities with trained models...")
     modality_list = []
     for mod in all_modalities:
-        exp_n_path = os.path.join('./guide_prior/', f"init_exp_n_{mod}.pt")
-        if os.path.exists(exp_n_path):
+        # Check if model files exist in results directory
+        # Look for toy_exp_n_<modality>_*.pt pattern
+        import glob
+        exp_n_pattern = os.path.join(args.model_dir, f'toy_exp_n_{mod}_*.pt')
+        exp_n_files = glob.glob(exp_n_pattern)
+        
+        if exp_n_files:
             # Verify it's a valid PyTorch file
             try:
-                test_load = torch.load(exp_n_path, map_location='cpu', weights_only=False)
+                test_load = torch.load(exp_n_files[0], map_location='cpu', weights_only=False)
                 modality_list.append(mod)
-                print(f"  ✓ {mod}: trained model found")
+                print(f"  ✓ {mod}: trained model found ({os.path.basename(exp_n_files[0])})")
             except Exception as e:
                 print(f"  ✗ {mod}: file exists but cannot be loaded ({e})")
         else:
-            print(f"  ✗ {mod}: no trained model file (expected: {exp_n_path})")
+            print(f"  ✗ {mod}: no trained model file (expected pattern: {exp_n_pattern})")
     
     if not modality_list:
         print("\nERROR: No modalities with valid trained models found!")
-        print("Make sure ./guide_prior/ contains init_exp_n_<modality>.pt files")
+        print(f"Make sure {args.model_dir} contains toy_exp_n_<modality>_*.pt files")
+        print("These files are created during model training with run_MixEHR.py")
         return
     
     print(f"\nUsing modalities: {modality_list}")
