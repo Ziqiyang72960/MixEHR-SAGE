@@ -677,8 +677,19 @@ class MixEHR_SAGE(nn.Module):
             phi_m = (self.exp_n[m] + self.beta) / (self.exp_n_sum[m] + self.beta_sum[m] + mini_val)
             self._phi_cached.append(phi_m)
         
-        # Cache seed phi for guided modality
-        self._phi_seed_cached = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
+        # Cache seed phi for guided modality - check shape compatibility first
+        try:
+            # Check if exp_s and mu/mu_sum have compatible shapes
+            if self.exp_s.shape[0] == self.V[self.guided_modality]:
+                self._phi_seed_cached = (self.exp_s + self.mu) / (self.exp_s_sum + self.mu_sum + mini_val)
+            else:
+                print(f"Warning: exp_s shape {self.exp_s.shape} doesn't match expected vocabulary size {self.V[self.guided_modality]}")
+                print("Skipping seed phi caching - will compute on-the-fly if needed")
+                self._phi_seed_cached = None
+        except (ValueError, RuntimeError) as e:
+            print(f"Warning: Could not cache seed phi distribution due to shape mismatch: {e}")
+            print("Skipping seed phi caching - will compute on-the-fly if needed")
+            self._phi_seed_cached = None
         
         print("Cached phi distributions for fast inference")
 
