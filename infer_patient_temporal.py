@@ -698,11 +698,21 @@ def main():
     
     # Create dummy corpus (just for structure, not actual training)
     class DummyCorpus:
+        """Minimal corpus structure for loading trained model."""
         def __init__(self, V_sizes, modalities):
             self.V = V_sizes
             self.modalities = modalities
-            self.D = 0  # No documents needed for inference
+            self.D = 1  # At least 1 document for DataLoader compatibility
             self.C = 0
+            self.dataset = []  # Empty dataset for compatibility
+        
+        def __len__(self):
+            """Required by PyTorch DataLoader."""
+            return self.D
+        
+        def __getitem__(self, index):
+            """Required by PyTorch DataLoader - returns dummy document."""
+            return None, index
     
     corpus = DummyCorpus(V_sizes, modality_list)
     
