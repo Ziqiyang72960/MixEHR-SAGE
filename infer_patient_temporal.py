@@ -711,14 +711,26 @@ def main():
     print("\nLoading model configuration...")
     K = 5  # Default number of topics - will be determined from loaded model
     
-    # Try to infer K from model files
+    # Try to infer K from model files - check multiple possible patterns
     import glob
-    exp_m_files = glob.glob(os.path.join(args.model_dir, "toy_exp_m_*.pt"))
-    if exp_m_files:
-        # Load one file to get K
-        sample = torch.load(exp_m_files[0], map_location=device, weights_only=False)
-        K = sample.shape[0]
-        print(f"Detected K={K} topics from model files")
+    K_detected = False
+    for pattern in ["toy_exp_m_*.pt", "toy_exp_n_*.pt", "toy_exp_s_*.pt"]:
+        exp_files = glob.glob(os.path.join(args.model_dir, pattern))
+        if exp_files:
+            try:
+                # Load one file to get K
+                sample = torch.load(exp_files[0], map_location=device, weights_only=False)
+                if hasattr(sample, 'shape') and len(sample.shape) >= 1:
+                    K = sample.shape[0]
+                    print(f"Detected K={K} topics from {os.path.basename(exp_files[0])}")
+                    K_detected = True
+                    break
+            except Exception as e:
+                print(f"Warning: Could not load {exp_files[0]}: {e}")
+                continue
+    
+    if not K_detected:
+        print(f"Warning: Could not auto-detect K from model files, using default K={K}")
     
     # Create dummy seed matrix (will be overwritten by loaded model)
     seeds_topic_matrix = np.zeros((V_sizes[0], K))
@@ -736,8 +748,17 @@ def main():
         )
         print("✓ Model loaded successfully")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Make sure the model directory contains trained .pt files")
+        print(f"\n{'='*80}")
+        print(f"ERROR: Failed to load model from {args.model_dir}")
+        print(f"{'='*80}")
+        print(f"\nError details: {e}")
+        import traceback
+        print("\nFull traceback:")
+        traceback.print_exc()
+        print(f"\nMake sure the model directory contains trained .pt files with patterns:")
+        print("  - toy_exp_n_<modality>_*.pt (phi distributions)")
+        print("  - toy_exp_m_*.pt (theta parameters)")
+        print("  - toy_exp_s_<modality>_*.pt (seed distributions)")
         return
     
     # Load temporal data
