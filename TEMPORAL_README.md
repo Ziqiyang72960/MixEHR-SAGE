@@ -2,6 +2,41 @@
 
 This document describes the temporal disease prediction functionality that enables time-based analysis and future disease risk prediction.
 
+## Table of Contents
+
+1. [Quick Start Workflow](#quick-start-workflow)
+2. [Overview](#overview)
+3. [Complete Pipeline: From Training to Temporal Inference](#complete-pipeline-from-training-to-temporal-inference)
+4. [Data Format](#data-format)
+5. [Usage](#usage)
+6. [Implementation Details](#implementation-details)
+7. [References](#references)
+
+## Quick Start Workflow
+
+**Can I use my existing trained model?**
+- **Yes!** If you already have trained MixEHR-SAGE model results (e.g., in `./results/` folder), you can use them directly for temporal inference without retraining.
+- The temporal inference script uses the **same phi and theta distributions** learned from your standard MixEHR-SAGE training.
+
+**Do I need to retrain the model for temporal prediction?**
+- **No!** Temporal prediction uses your existing trained model's phi distributions.
+- You only need temporal patient data with timestamps (see [Data Format](#data-format)).
+
+**Basic workflow:**
+```bash
+# If you already have results in ./results/, skip to step 3
+# 1. Train MixEHR-SAGE (if needed)
+python run_MixEHR.py ./data/
+
+# 2. (Results are now in ./results/)
+
+# 3. Run temporal inference with your temporal data
+python infer_patient_temporal.py ./results/ \
+    --temporal-data data/temporal_patient_data.csv \
+    --method lstm \
+    --output temporal_predictions.csv
+```
+
 ## Overview
 
 The temporal prediction framework implements three approaches for predicting future disease occurrences based on historical patient data with timestamps:
@@ -9,6 +44,132 @@ The temporal prediction framework implements three approaches for predicting fut
 1. **LSTM-based Temporal VAE**: Learns temporal dynamics using variational autoencoders
 2. **Simple Regression Models**: Predicts time to next visit or classification of visits within time windows
 3. **Autoregressive Models**: Generates future topic mixtures (theta) autoregressively
+
+## Complete Pipeline: From Training to Temporal Inference
+
+### Step 1: Standard MixEHR-SAGE Training (One-Time Setup)
+
+**If you don't have a trained model yet:**
+
+1. **Prepare your training data** in the data directory (e.g., `./data/`):
+   - `ukbb_metadata.csv`: Metadata file specifying modalities
+   - Modality data files (e.g., `ukb_synthetic_icd.csv`, `ukb_synthetic_medication.txt`, etc.)
+
+2. **Run the standard training pipeline:**
+   ```bash
+   python run_MixEHR.py ./data/ --output ./results/ --epochs 5
+   ```
+
+   This command:
+   - Processes the corpus
+   - Builds priors (GMM, token counts, PheCode mappings)
+   - Trains the MixEHR-SAGE model
+   - Saves learned parameters (phi, theta, pi) to `./results/`
+
+3. **Training outputs** (saved in `./results/`):
+   - `toy_exp_n_icd_*.pt`: Phi distributions for ICD codes
+   - `toy_exp_n_med_*.pt`: Phi distributions for medications
+   - `toy_exp_n_opcs_*.pt`: Phi distributions for OPCS codes
+   - `toy_exp_m_*.pt`: Theta distributions for patients
+   - `toy_exp_s_*.pt`: Seed word distributions
+   - `toy_pi_*.pt`: Pi parameters (mixing weights)
+
+**If you already have a trained model:**
+- You can use your existing `./results/` folder directly
+- No need to retrain unless you want to update the model with new data
+- The temporal inference uses the **phi distributions** from these files
+
+### Step 2: Prepare Temporal Patient Data
+
+Create a CSV file with time-stamped patient records:
+
+**Format: `SUBJECT_ID, code, timestamp, modality`**
+
+Example (`data/temporal_patient_data.csv`):
+```csv
+SUBJECT_ID,code,timestamp,modality
+patient_001,E11.9,2015-03-15,icd
+patient_001,C03AB01,1,med
+patient_001,K30100,2015-04-20,opcs
+patient_001,I10,2015-09-10,icd
+patient_002,E78.5,2016-01-05,icd
+patient_002,C09AA01,2,med
+```
+
+**Timestamp specifications:**
+- **ICD/OPCS codes**: Use `YYYY-MM-DD` format (e.g., `2015-03-15`)
+- **Medications**: Use categorical values `0`, `1`, `2`, `3` representing time ranges:
+  - `0` = 2000-2005
+  - `1` = 2006-2010
+  - `2` = 2010-2015
+  - `3` = 2016-2020
+
+### Step 3: Run Temporal Inference
+
+Use the trained model (from `./results/`) with your temporal data:
+
+```bash
+# LSTM-based temporal prediction
+python infer_patient_temporal.py ./results/ \
+    --temporal-data data/temporal_patient_data.csv \
+    --method lstm \
+    --window-months 6 \
+    --epochs 50 \
+    --output lstm_predictions.csv
+
+# Simple regression
+python infer_patient_temporal.py ./results/ \
+    --temporal-data data/temporal_patient_data.csv \
+    --method regression \
+    --task classification \
+    --predict-window 6 \
+    --output regression_predictions.csv
+
+# Autoregressive prediction
+python infer_patient_temporal.py ./results/ \
+    --temporal-data data/temporal_patient_data.csv \
+    --method autoregressive \
+    --future-steps 3 \
+    --output autoregressive_predictions.csv
+```
+
+### Step 4: Interpret Results
+
+The temporal inference script:
+1. **Loads phi distributions** from your trained model (`./results/`)
+2. **Processes temporal data** into time windows
+3. **Computes theta_t** for each patient at each time point
+4. **Trains temporal model** (LSTM/regression/autoregressive) on historical sequences
+5. **Predicts future** disease risk or time-to-event
+
+**Output files contain:**
+- Patient IDs
+- Time points (or predicted time gaps)
+- Predicted theta distributions (topic mixtures)
+- Disease probabilities
+- Healthy status (if threshold is specified)
+
+### Important Notes
+
+**Model Compatibility:**
+- ✅ You can use your existing trained model from `./results/`
+- ✅ No need to modify `run_MixEHR.py` for temporal inference
+- ✅ The same phi distributions work for both static and temporal inference
+- ❌ Do NOT retrain the base model just for temporal prediction
+
+**Data Requirements:**
+- **Training data** (for `run_MixEHR.py`): Standard EHR data without timestamps
+- **Temporal data** (for `infer_patient_temporal.py`): Same codes but WITH timestamps
+
+**When to Retrain the Base Model:**
+- You have new patient cohorts to train on
+- You want to include additional modalities
+- You want to update the phi distributions with more data
+
+**When NOT to Retrain:**
+- You just want to do temporal predictions on new patients
+- You want to try different temporal prediction methods (LSTM/regression/autoregressive)
+- You want to adjust time windows or prediction horizons
 
 ## Data Format
 
