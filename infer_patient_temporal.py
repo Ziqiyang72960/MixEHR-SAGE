@@ -671,6 +671,8 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--task', type=str, choices=['regression', 'classification'],
                         default='regression', help='Task type for simple regression method')
+    parser.add_argument('--iterations', type=int, default=10,
+                        help='Number of inference iterations for computing theta')
     
     args = parser.parse_args()
     
@@ -684,37 +686,189 @@ def main():
     print("="*80)
     
     # Load vocabulary mappings
+    print("\nLoading vocabulary mappings...")
     vocab_mappings = load_vocab_mappings('./mapping/')
-    print(f"Loaded vocabulary for modalities: {list(vocab_mappings.keys())}")
+    modality_list = list(vocab_mappings.keys())
+    print(f"Loaded vocabulary for modalities: {modality_list}")
+    
+    # Create a minimal corpus object for model loading
+    print("\nCreating corpus structure...")
+    # We need V (vocabulary sizes) and modalities
+    V_sizes = [len(vocab_mappings[mod]) for mod in modality_list]
+    
+    # Create dummy corpus (just for structure, not actual training)
+    class DummyCorpus:
+        def __init__(self, V_sizes, modalities):
+            self.V = V_sizes
+            self.modalities = modalities
+            self.D = 0  # No documents needed for inference
+            self.C = 0
+    
+    corpus = DummyCorpus(V_sizes, modality_list)
+    
+    # Load or create seed matrix (K x V for guided modality)
+    # This is simplified - you may need actual seed matrix from training
+    print("\nLoading model configuration...")
+    K = 5  # Default number of topics - will be determined from loaded model
+    
+    # Try to infer K from model files
+    import glob
+    exp_m_files = glob.glob(os.path.join(args.model_dir, "toy_exp_m_*.pt"))
+    if exp_m_files:
+        # Load one file to get K
+        sample = torch.load(exp_m_files[0], map_location=device, weights_only=False)
+        K = sample.shape[0]
+        print(f"Detected K={K} topics from model files")
+    
+    # Create dummy seed matrix (will be overwritten by loaded model)
+    seeds_topic_matrix = np.zeros((V_sizes[0], K))
     
     # Load trained model
-    print("\nLoading trained MixEHR-SAGE model...")
-    # This is simplified - you'd need to properly load the model based on your structure
-    # For now, we'll note that this needs the actual model loading logic
+    print(f"\nLoading trained MixEHR-SAGE model from {args.model_dir}...")
+    try:
+        model = MixEHR_SAGE.load_trained_model(
+            args.model_dir, 
+            corpus, 
+            seeds_topic_matrix, 
+            modality_list,
+            guided_modality=0,
+            guide_prior_path='./guide_prior/'
+        )
+        print("✓ Model loaded successfully")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Make sure the model directory contains trained .pt files")
+        return
     
     # Load temporal data
-    patient_sequences = load_temporal_data(args.temporal_data, vocab_mappings, list(vocab_mappings.keys()))
+    print("\nLoading temporal patient data...")
+    patient_sequences = load_temporal_data(args.temporal_data, vocab_mappings, modality_list)
+    print(f"Loaded data for {len(patient_sequences)} patients")
     
     # Create time windows
     print(f"\nCreating time windows (window size: {args.window_months} months)...")
     patient_windows = create_time_windows(patient_sequences, window_size_months=args.window_months)
     print(f"Created time windows for {len(patient_windows)} patients")
     
-    # Note: The following would require a loaded model
+    # Compute theta sequences
+    print(f"\nComputing theta sequences (iterations: {args.iterations})...")
+    theta_sequences = compute_theta_sequence(model, patient_windows, modality_list, 
+                                            num_iterations=args.iterations)
+    print(f"Computed theta sequences for {len(theta_sequences)} patients")
+    
+    # Run selected prediction method
     print("\n" + "="*80)
-    print("NOTE: Full implementation requires loading trained MixEHR-SAGE model")
-    print("      and computing theta sequences. This is a framework implementation.")
+    print(f"Running {args.method.upper()} temporal prediction")
     print("="*80)
     
-    # Placeholder for demonstration
-    print(f"\nMethod '{args.method}' framework is ready")
-    print(f"To complete implementation:")
-    print(f"  1. Load trained model from {args.model_dir}")
-    print(f"  2. Compute theta sequences using compute_theta_sequence()")
-    print(f"  3. Train {args.method} model")
-    print(f"  4. Make predictions and save to {args.output}")
+    if args.method == 'lstm':
+        print("\n1. Training LSTM Temporal VAE...")
+        temporal_model = train_lstm_temporal(theta_sequences, K, epochs=args.epochs)
+        
+        print("\n2. Making predictions...")
+        predictions = {}
+        for patient_id, sequence in theta_sequences.items():
+            if len(sequence) >= 2:
+                # Use sequence to predict next theta
+                theta_seq = torch.stack([theta for _, theta in sequence])
+                input_seq = theta_seq.unsqueeze(0)
+                
+                with torch.no_grad():
+                    pred_theta = temporal_model(input_seq, predict_steps=args.future_steps)
+                
+                predictions[patient_id] = {
+                    'method': 'lstm',
+                    'predictions': pred_theta.cpu().numpy(),
+                    'is_healthy': [predict_healthy_threshold(pred_theta[i], args.healthy_threshold) 
+                                  for i in range(pred_theta.shape[0])]
+                }
+        
+        print(f"Generated predictions for {len(predictions)} patients")
     
-    print("\nTemporal prediction framework initialized successfully!")
+    elif args.method == 'regression':
+        print(f"\n1. Training {args.task} model...")
+        regression_model = train_regression_model(theta_sequences, K, task=args.task, 
+                                                  predict_window_months=args.predict_window,
+                                                  epochs=args.epochs)
+        
+        print("\n2. Making predictions...")
+        predictions = {}
+        for patient_id, sequence in theta_sequences.items():
+            if len(sequence) >= 2:
+                # Use last theta to predict
+                last_theta = sequence[-1][1].unsqueeze(0)
+                
+                with torch.no_grad():
+                    if args.task == 'classification':
+                        pred = torch.sigmoid(regression_model(last_theta))
+                        predictions[patient_id] = {
+                            'method': 'regression_classification',
+                            'visit_probability': pred.item(),
+                            'visit_predicted': pred.item() > 0.5
+                        }
+                    else:  # regression
+                        pred = regression_model(last_theta)
+                        predictions[patient_id] = {
+                            'method': 'regression_time',
+                            'time_to_next_visit_years': pred.item()
+                        }
+        
+        print(f"Generated predictions for {len(predictions)} patients")
+    
+    elif args.method == 'autoregressive':
+        print("\n1. Training Autoregressive Transformer...")
+        ar_model = train_autoregressive_model(theta_sequences, K, epochs=args.epochs)
+        
+        print("\n2. Making predictions...")
+        predictions = {}
+        for patient_id, sequence in theta_sequences.items():
+            if len(sequence) >= 3:
+                theta_seq = torch.stack([theta for _, theta in sequence])
+                input_seq = theta_seq.unsqueeze(0)
+                
+                with torch.no_grad():
+                    pred_theta = ar_model(input_seq, predict_steps=args.future_steps)
+                
+                predictions[patient_id] = {
+                    'method': 'autoregressive',
+                    'predictions': pred_theta.cpu().numpy(),
+                    'is_healthy': [predict_healthy_threshold(pred_theta[i], args.healthy_threshold) 
+                                  for i in range(pred_theta.shape[0])]
+                }
+        
+        print(f"Generated predictions for {len(predictions)} patients")
+    
+    # Save predictions
+    print(f"\nSaving predictions to {args.output}...")
+    save_predictions(predictions, args.output)
+    
+    print("\n" + "="*80)
+    print("Temporal prediction completed successfully!")
+    print("="*80)
+
+
+def save_predictions(predictions, output_path):
+    """Save predictions to CSV file."""
+    rows = []
+    for patient_id, pred_data in predictions.items():
+        if pred_data['method'] in ['lstm', 'autoregressive']:
+            for step, theta_pred in enumerate(pred_data['predictions']):
+                row = {
+                    'patient_id': patient_id,
+                    'method': pred_data['method'],
+                    'future_step': step + 1,
+                    'predicted_theta': str(theta_pred.tolist() if hasattr(theta_pred, 'tolist') else theta_pred),
+                    'is_healthy': pred_data['is_healthy'][step]
+                }
+                rows.append(row)
+        else:
+            row = {'patient_id': patient_id, 'method': pred_data['method']}
+            row.update(pred_data)
+            rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False)
+    print(f"Saved {len(rows)} prediction rows")
 
 
 if __name__ == '__main__':
