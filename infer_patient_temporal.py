@@ -688,8 +688,31 @@ def main():
     # Load vocabulary mappings
     print("\nLoading vocabulary mappings...")
     vocab_mappings = load_vocab_mappings('./mapping/')
-    modality_list = list(vocab_mappings.keys())
-    print(f"Loaded vocabulary for modalities: {modality_list}")
+    all_modalities = list(vocab_mappings.keys())
+    print(f"Found vocabulary for modalities: {all_modalities}")
+    
+    # Filter modalities to only those with trained model files
+    print("\nFiltering modalities with trained models...")
+    modality_list = []
+    for mod in all_modalities:
+        exp_n_path = os.path.join('./guide_prior/', f"init_exp_n_{mod}.pt")
+        if os.path.exists(exp_n_path):
+            # Verify it's a valid PyTorch file
+            try:
+                test_load = torch.load(exp_n_path, map_location='cpu', weights_only=False)
+                modality_list.append(mod)
+                print(f"  ✓ {mod}: trained model found")
+            except Exception as e:
+                print(f"  ✗ {mod}: file exists but cannot be loaded ({e})")
+        else:
+            print(f"  ✗ {mod}: no trained model file (expected: {exp_n_path})")
+    
+    if not modality_list:
+        print("\nERROR: No modalities with valid trained models found!")
+        print("Make sure ./guide_prior/ contains init_exp_n_<modality>.pt files")
+        return
+    
+    print(f"\nUsing modalities: {modality_list}")
     
     # Create a minimal corpus object for model loading
     print("\nCreating corpus structure...")
