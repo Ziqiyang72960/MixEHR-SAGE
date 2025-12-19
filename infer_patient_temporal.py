@@ -702,21 +702,17 @@ def main():
         exp_n_files = glob.glob(exp_n_pattern)
         
         if exp_n_files:
-            # Verify it's a valid PyTorch file
-            try:
-                test_load = torch.load(exp_n_files[0], map_location='cpu', weights_only=False)
-                modality_list.append(mod)
-                print(f"  ✓ {mod}: trained model found ({os.path.basename(exp_n_files[0])})")
-            except Exception as e:
-                print(f"  ✗ {mod}: file exists but cannot be loaded ({e})")
+            modality_list.append(mod)
+            print(f"  ✓ {mod}: model file found ({os.path.basename(exp_n_files[0])})")
         else:
-            print(f"  ✗ {mod}: no trained model file (expected pattern: {exp_n_pattern})")
+            print(f"  ✗ {mod}: no model file (expected pattern: {exp_n_pattern})")
     
     if not modality_list:
-        print("\nERROR: No modalities with valid trained models found!")
-        print(f"Make sure {args.model_dir} contains toy_exp_n_<modality>_*.pt files")
-        print("These files are created during model training with run_MixEHR.py")
-        return
+        print("\nWARNING: No modality files found in expected locations.")
+        print(f"Attempting to use common modalities (excluding 'lab'): {[m for m in all_modalities if m != 'lab']}")
+        print("Note: This may fail if the model wasn't trained with these modalities.")
+        print("If you get errors, make sure to run 'git lfs pull' to download actual model files.")
+        modality_list = [m for m in all_modalities if m != 'lab']
     
     print(f"\nUsing modalities: {modality_list}")
     
