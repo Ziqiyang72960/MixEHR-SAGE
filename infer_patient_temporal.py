@@ -746,23 +746,37 @@ def main():
     print("\nLoading model configuration...")
     K = 5  # Default number of topics - will be determined from loaded model
     
-    # Try to infer K from model files - check multiple possible patterns
+    # Try to infer K from model files
+    # toy_exp_s_*.pt files (seed distributions) don't have modality names
+    # toy_exp_m_*.pt files (theta parameters) don't have modality names
+    # toy_exp_n_<modality>_*.pt files (phi distributions) have modality names
     import glob
     K_detected = False
-    for pattern in ["toy_exp_m_*.pt", "toy_exp_n_*.pt", "toy_exp_s_*.pt"]:
-        exp_files = glob.glob(os.path.join(args.model_dir, pattern))
-        if exp_files:
+    
+    # First try seed files (toy_exp_s_*.pt) - no modality name
+    seed_files = glob.glob(os.path.join(args.model_dir, "toy_exp_s_*.pt"))
+    if seed_files:
+        try:
+            sample = torch.load(seed_files[0], map_location=device, weights_only=False)
+            if hasattr(sample, 'shape') and len(sample.shape) >= 1:
+                K = sample.shape[0]  # First dimension should be K (number of topics)
+                print(f"Detected K={K} topics from {os.path.basename(seed_files[0])}")
+                K_detected = True
+        except Exception as e:
+            print(f"Warning: Could not load seed file {seed_files[0]}: {e}")
+    
+    # If seed files didn't work, try theta files (toy_exp_m_*.pt) - no modality name
+    if not K_detected:
+        theta_files = glob.glob(os.path.join(args.model_dir, "toy_exp_m_*.pt"))
+        if theta_files:
             try:
-                # Load one file to get K
-                sample = torch.load(exp_files[0], map_location=device, weights_only=False)
+                sample = torch.load(theta_files[0], map_location=device, weights_only=False)
                 if hasattr(sample, 'shape') and len(sample.shape) >= 1:
                     K = sample.shape[0]
-                    print(f"Detected K={K} topics from {os.path.basename(exp_files[0])}")
+                    print(f"Detected K={K} topics from {os.path.basename(theta_files[0])}")
                     K_detected = True
-                    break
             except Exception as e:
-                print(f"Warning: Could not load {exp_files[0]}: {e}")
-                continue
+                print(f"Warning: Could not load theta file {theta_files[0]}: {e}")
     
     if not K_detected:
         print(f"Warning: Could not auto-detect K from model files, using default K={K}")
