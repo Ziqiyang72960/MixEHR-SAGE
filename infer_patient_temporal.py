@@ -399,7 +399,7 @@ def create_time_windows(patient_sequences, window_size_months=6):
     return patient_windows
 
 
-def compute_theta_sequence(model, patient_windows, vocab_mappings, modalities):
+def compute_theta_sequence(model, patient_windows, vocab_mappings, modalities, num_iterations=10):
     """
     Compute theta for each time window.
     
@@ -408,6 +408,7 @@ def compute_theta_sequence(model, patient_windows, vocab_mappings, modalities):
         patient_windows: Output from create_time_windows
         vocab_mappings: Vocabulary mappings
         modalities: List of modality names
+        num_iterations: Number of inference iterations (default: 10)
     
     Returns:
         theta_sequences: Dict mapping patient_id to list of (timestamp, theta) tuples
@@ -433,7 +434,7 @@ def compute_theta_sequence(model, patient_windows, vocab_mappings, modalities):
             
             # Infer theta for this time window
             try:
-                theta = model.infer_theta_by_modality(bow_by_modality, num_iterations=10)
+                theta = model.infer_theta_by_modality(bow_by_modality, num_iterations=num_iterations)
                 if theta is not None:
                     patient_thetas.append((timestamp, theta))
             except Exception as e:
@@ -822,7 +823,7 @@ def main():
     
     # Compute theta sequences
     print(f"\nComputing theta sequences (iterations: {args.iterations})...")
-    theta_sequences = compute_theta_sequence(model, patient_windows, modality_list, 
+    theta_sequences = compute_theta_sequence(model, patient_windows, vocab_mappings, modality_list, 
                                             num_iterations=args.iterations)
     print(f"Computed theta sequences for {len(theta_sequences)} patients")
     
