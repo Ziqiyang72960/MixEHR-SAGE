@@ -15,7 +15,7 @@ vocab_ids = pickle.load(open("../mapping/icd_vocab_ids.pkl", "rb"))
 inv_vocab_ids = {v: k for k, v in vocab_ids.items()}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-seeds_topic_matrix = torch.load("../phecode_mapping/seed_topic_matrix.pt", map_location=device)  # get seed word-topic mapping, V x K matrix
+seeds_topic_matrix = torch.load("../phecode_mapping/seed_topic_matrix.pt", map_location=device, weights_only=False)  # get seed word-topic mapping, V x K matrix
 V, K = seeds_topic_matrix.shape
 c = Corpus.read_corpus_from_directory('../store/', 'corpus.pkl') # read corpus file
 

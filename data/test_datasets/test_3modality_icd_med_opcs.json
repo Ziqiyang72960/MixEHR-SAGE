@@ -1,0 +1,602 @@
+[
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "F32.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "N18.3",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "K21.0",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "F32.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "M54.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "N18.3",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "N18.3",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "K21.0",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "K21.0",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "M54.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "F32.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "J44.1",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "J44.1",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "N18.3",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "I25.10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "I10",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "J44.1",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "E78.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "J44.1",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "E11.9",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "M54.5",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "G47.33",
+    "modality": "icd"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "C03CA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "N05BA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "C03CA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "C03CA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "B01AC06",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "A10BA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "B01AC06",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "A10BA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "C07AA05",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "N05BA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "C03CA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "C07AA05",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "N02BE01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "N02BE01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "N05BA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "C07AA05",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "N05BA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "A10BA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "C03CA01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "N02BE01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "C07AA05",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "N02BE01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "A10BA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "C07AA05",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "A02BC01",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "A10BA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "B01AC06",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "B01AC06",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "C09AA02",
+    "modality": "med"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "H22.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_1",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "Y53.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_2",
+    "code": "K60.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "C75.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "E85.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_3",
+    "code": "C75.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "C75.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_4",
+    "code": "K60.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "E85.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "J18.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_5",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "E85.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "C75.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_6",
+    "code": "J18.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "G45.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "E85.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_7",
+    "code": "G45.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "Y53.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "J18.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_8",
+    "code": "J18.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "E85.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "Y53.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_9",
+    "code": "C75.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "H22.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "W40.1",
+    "modality": "opcs"
+  },
+  {
+    "SUBJECT_ID": "patient_10",
+    "code": "Y53.1",
+    "modality": "opcs"
+  }
+]
