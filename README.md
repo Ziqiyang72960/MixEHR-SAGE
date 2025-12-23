@@ -101,16 +101,16 @@ optional arguments:
   --corpus, -c          Path to corpus directory (default: ./store/)
   --iterations, -i      Number of VI iterations (default: 10)
   --top-k, -k           Output only top-k topics per patient
-  --explain             Generate ChatGPT explanation prompts
+  --explain             Generate LLM explanation prompts
   --explain-output      Output file for explanations (default: patient_explanations.txt)
   --explain-top-topics  Number of top topics in explanations (default: 5)
   --explain-top-codes   Number of top codes per topic (default: 10)
 ```
 
 
-### ChatGPT Explanations
+### LLM Prompt Explanations Generation
 
-Generate detailed explanation prompts for ChatGPT to interpret patient phenotype probabilities. **Each patient gets a separate entry** for easy use:
+Generate detailed explanation prompts for LLM to interpret patient phenotype probabilities. **Each patient gets a separate entry** for easy use:
 
 ```bash
 # Generate explanations with inference (TXT format - one section per patient)
@@ -140,7 +140,7 @@ The generated prompts include:
 2. **Patient medical records** - Actual codes observed for the patient
 3. **Top codes for each topic (φ)** - Most probable codes defining each **PheCode phenotype**
 
-Copy the generated prompts to ChatGPT for human-readable explanations of the patient's risk profile.
+Copy the generated prompts to LLM for human-readable explanations of the patient's risk profile.
 
 ## Input Data Format
 
