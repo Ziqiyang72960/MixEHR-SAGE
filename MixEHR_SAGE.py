@@ -15,7 +15,7 @@ mini_val = 1e-6
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class MixEHR_SAGE(nn.Module):
-    def __init__(self, corpus, seeds_topic_matrix, modality_list, guided_modality=0, stochastic_VI=True, elbo_modality=0, batch_size=1000, out='./store/', guide_prior_path='./guide_prior/'):
+    def __init__(self, corpus, seeds_topic_matrix, modality_list, guided_modality=0, stochastic_VI=True, elbo_modality=0, batch_size=1000, out='./store/', guide_prior_path='./guide_prior/', enable_temporal=False, num_time_steps=10):
         """
         Arguments:
             corpus: document class.
@@ -23,6 +23,8 @@ class MixEHR_SAGE(nn.Module):
             batch_size: batch size for a minibatch
             out: output path
             guide_prior_path: path to guide_prior directory containing initialized tokens
+            enable_temporal: whether to enable temporal inference with LSTM (default: False)
+            num_time_steps: number of time steps/age groups for temporal modeling (default: 10)
         """
         super(MixEHR_SAGE, self).__init__()
         self.modalities = modality_list # name of modalites
@@ -56,7 +58,7 @@ class MixEHR_SAGE(nn.Module):
                       for m in range(self.modaltiy_num)] # exp_n for differnt modality
         self.exp_s = torch.zeros(self.V[guided_modality], self.K, dtype=torch.double, requires_grad=False, device=device) # use V to represent, regular word for a topic is 0, only for guided modality
         self.exp_q_z = 0
-        self.eta = 0.1
+        self.alpha_prior = 0.1  # Renamed from eta to avoid conflict with temporal eta
         self.init_priors = "./guide_prior/init_tokens/"
         self.initialize_tokens()
         self.elbo = []
@@ -64,26 +66,44 @@ class MixEHR_SAGE(nn.Module):
         self.term2 = []
         self.term3 = []
         self.term4 = []
+        
+        # Store temporal configuration
+        self.enable_temporal = enable_temporal
+        self.num_time_steps = num_time_steps
 
         # temporal inference component
-        # self.eta = torch.rand(self.T, self.K, requires_grad=False, device=device)
-        # self.alpha = self.alpha_softplus_act().to(device) # T x K
-        # variational distribution for eta via amortizartion, eta is T x K matrix
-        # self.eta_hidden_size = 200 # number of hidden units for rnn
-        # self.eta_dropout = 0.0 # dropout rate on rnn for eta
-        # self.eta_nlayers = 3 # number of layers for eta
-        # self.delta = 0.01  # prior variance
-        # self.q_eta_map = nn.Linear(self.V, self.eta_hidden_size)
-        # self.q_eta = nn.LSTM(self.eta_hidden_size, self.eta_hidden_size, self.eta_nlayers, dropout=self.eta_dropout)
-        # self.mu_q_eta = nn.Linear(self.eta_hidden_size+self.K, self.K, bias=True)
-        # self.logsigma_q_eta  = nn.Linear(self.eta_hidden_size+self.K, self.K, bias=True)
-        # optimizer
-        # self.clip = 0
-        # self.lr = 0.0001
-        # self.wdecay = 1.2e-6
-        # self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wdecay)
-        # self.max_logsigma_t = 5.0 # avoid the value to be too big
-        # self.min_logsigma_t = -5.0
+        if self.enable_temporal:
+            self.T = num_time_steps  # number of time steps
+            # Initialize eta as T x K matrix for temporal hyperparameters
+            self.eta = torch.rand(self.T, self.K, dtype=torch.double, requires_grad=True, device=device)
+            
+            # variational distribution for eta via amortization, eta is T x K matrix
+            self.eta_hidden_size = 200  # number of hidden units for rnn
+            self.eta_dropout = 0.0  # dropout rate on rnn for eta
+            self.eta_nlayers = 3  # number of layers for eta
+            self.delta = 0.01  # prior variance
+            
+            # LSTM network for temporal inference
+            # Input: vocabulary distribution at each time step
+            self.q_eta_map = nn.Linear(self.V[self.guided_modality], self.eta_hidden_size)
+            self.q_eta = nn.LSTM(self.eta_hidden_size, self.eta_hidden_size, self.eta_nlayers, 
+                                dropout=self.eta_dropout, batch_first=True)
+            self.mu_q_eta = nn.Linear(self.eta_hidden_size + self.K, self.K, bias=True)
+            self.logsigma_q_eta = nn.Linear(self.eta_hidden_size + self.K, self.K, bias=True)
+            
+            # optimizer for LSTM parameters
+            self.clip = 0
+            self.lr = 0.0001
+            self.wdecay = 1.2e-6
+            self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wdecay)
+            self.max_logsigma_t = 5.0  # avoid the value to be too big
+            self.min_logsigma_t = -5.0
+            
+            print(f"Temporal inference enabled with {self.T} time steps")
+        else:
+            # Use scalar alpha_prior for non-temporal inference
+            self.T = 1
+            print("Temporal inference disabled, using static alpha_prior")
 
     def initialize_tokens(self):
         '''
@@ -147,9 +167,10 @@ class MixEHR_SAGE(nn.Module):
         # compute kl(q_z || p_z)
         # E_q[log q(z | gamma)]
         # E_q[ log p(z | alpha), alpha is softplus(eta) if the temporal component is opened
-        constant_terms = self.D * torch.lgamma(torch.tensor(self.K * self.eta)) - self.D * self.K * torch.lgamma(torch.tensor(self.eta))
-        p_z = (torch.sum(torch.lgamma(self.eta + self.exp_m[batch_indices]), dim=1) -
-               torch.lgamma(self.K * self.eta + self.exp_m_sum[batch_indices]))
+        alpha = self.alpha_prior  # Use alpha_prior for non-temporal or as default
+        constant_terms = self.D * torch.lgamma(torch.tensor(self.K * alpha)) - self.D * self.K * torch.lgamma(torch.tensor(alpha))
+        p_z = (torch.sum(torch.lgamma(alpha + self.exp_m[batch_indices]), dim=1) -
+               torch.lgamma(self.K * alpha + self.exp_m_sum[batch_indices]))
         kl_z = torch.sum(p_z) + constant_terms - self.exp_q_z
         # kl_z = torch.sum(p_z) - self.exp_q_z
         # E_q[log p(w | z, beta, mu, pi)]
@@ -202,13 +223,13 @@ class MixEHR_SAGE(nn.Module):
             temp_gamma_rr = torch.zeros(self.V[guided_m], self.K, dtype=torch.double, device=device)
             BOW_nonzero = torch.nonzero(batch_BOW[d_i]).squeeze(dim=1)
             # seed word and seed topic
-            temp_gamma_ss[BOW_nonzero] = self.seeds_topic_matrix[BOW_nonzero] * (self.exp_m[doc_id] + self.eta) \
+            temp_gamma_ss[BOW_nonzero] = self.seeds_topic_matrix[BOW_nonzero] * (self.exp_m[doc_id] + self.alpha_prior) \
                                          * (self.mu + self.exp_s[BOW_nonzero]) / (self.mu_sum + self.exp_s_sum) * self.pi
             # seed word but regular topic
-            temp_gamma_sr[BOW_nonzero] = self.seeds_topic_matrix[BOW_nonzero] * (self.exp_m[doc_id] + self.eta) \
+            temp_gamma_sr[BOW_nonzero] = self.seeds_topic_matrix[BOW_nonzero] * (self.exp_m[doc_id] + self.alpha_prior) \
                                          * (self.beta + self.exp_n[guided_m][BOW_nonzero]) / (self.beta_sum[guided_m] + self.exp_n_sum[guided_m]) * (1-self.pi)
             # regular word must be regular topic
-            temp_gamma_rr[BOW_nonzero] = (1-self.seeds_topic_matrix[BOW_nonzero]) * (self.exp_m[doc_id] + self.eta) \
+            temp_gamma_rr[BOW_nonzero] = (1-self.seeds_topic_matrix[BOW_nonzero]) * (self.exp_m[doc_id] + self.alpha_prior) \
                                          * (self.beta + self.exp_n[guided_m][BOW_nonzero]) / (self.beta_sum[guided_m] + self.exp_n_sum[guided_m])
             # normalization
             temp_gamma_s_sum = temp_gamma_ss.sum(dim=1).unsqueeze(1) + temp_gamma_sr.sum(dim=1).unsqueeze(1)
@@ -261,7 +282,7 @@ class MixEHR_SAGE(nn.Module):
             temp_gamma = torch.zeros(self.V[unguided_m], self.K, dtype=torch.double, device=device) #  V x K
             BOW_nonzero = torch.nonzero(batch_BOW[d_i]).squeeze(dim=1)
             # regular word must be regular topic
-            temp_gamma[BOW_nonzero] = (self.exp_m[doc_id] + self.eta) * (self.beta + self.exp_n[unguided_m][BOW_nonzero]) \
+            temp_gamma[BOW_nonzero] = (self.exp_m[doc_id] + self.alpha_prior) * (self.beta + self.exp_n[unguided_m][BOW_nonzero]) \
                                       / (self.beta_sum[unguided_m] + self.exp_n_sum[unguided_m])
             # normalization
             temp_gamma_sum = temp_gamma.sum(dim=1).unsqueeze(1)
@@ -295,6 +316,138 @@ class MixEHR_SAGE(nn.Module):
         # self.pi = torch.where(self.pi > 0.7, self.pi, torch.ones(self.K, dtype=torch.double, device=device)*self.pi_init)
         # self.pi = torch.where(self.pi < 0.95, self.pi, torch.ones(self.K, dtype=torch.double, device=device)*self.pi_init*1.33)
         # print(self.pi.mean())
+
+    def alpha_softplus_act(self):
+        '''
+        Apply softplus activation to eta to get alpha (Dirichlet hyperparameters)
+        Softplus ensures alpha > 0: softplus(x) = log(1 + exp(x))
+        '''
+        return F.softplus(self.eta)
+    
+    def reparameterize(self, mu, logvar):
+        '''
+        Reparameterization trick for sampling from N(mu, var)
+        z = mu + std * epsilon, where epsilon ~ N(0, 1)
+        '''
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def encode_temporal_sequence(self, time_step_data):
+        '''
+        Encode temporal sequence data for LSTM input
+        
+        Args:
+            time_step_data: T x V tensor, vocabulary distribution at each time step
+        
+        Returns:
+            encoded: T x hidden_size tensor
+        '''
+        if not self.enable_temporal:
+            raise ValueError("Temporal inference is not enabled")
+        
+        # Map vocabulary distributions to hidden space
+        # time_step_data shape: (T, V[guided_modality])
+        encoded = self.q_eta_map(time_step_data.float())  # (T, eta_hidden_size)
+        return encoded
+    
+    def infer_eta_variational(self, time_step_data):
+        '''
+        Variational inference for eta (temporal hyperparameters) using LSTM
+        
+        Args:
+            time_step_data: T x V tensor, word distributions at each time step
+        
+        Returns:
+            eta_samples: T x K tensor, sampled eta values
+            mu_eta: T x K tensor, means of variational distribution
+            logvar_eta: T x K tensor, log-variances of variational distribution
+        '''
+        if not self.enable_temporal:
+            raise ValueError("Temporal inference is not enabled")
+        
+        # Encode input sequence
+        # time_step_data: (T, V) -> encoded: (T, hidden_size)
+        encoded = self.encode_temporal_sequence(time_step_data)
+        
+        # Add batch dimension for LSTM: (1, T, hidden_size)
+        encoded = encoded.unsqueeze(0)
+        
+        # LSTM forward pass
+        lstm_out, _ = self.q_eta(encoded)  # (1, T, hidden_size)
+        lstm_out = lstm_out.squeeze(0)  # (T, hidden_size)
+        
+        # Concatenate with previous eta for autoregressive modeling
+        # For the first time step, use zeros
+        prev_eta = torch.zeros(self.T, self.K, dtype=torch.float, device=device)
+        prev_eta[1:] = self.eta[:-1].clone().detach().float()  # Shift eta by one time step
+        
+        # Concatenate LSTM output with previous eta
+        lstm_eta_concat = torch.cat([lstm_out, prev_eta], dim=1)  # (T, hidden_size + K)
+        
+        # Compute variational parameters
+        mu_eta = self.mu_q_eta(lstm_eta_concat)  # (T, K)
+        logvar_eta = self.logsigma_q_eta(lstm_eta_concat)  # (T, K)
+        
+        # Clip log variance to avoid numerical issues
+        logvar_eta = torch.clamp(logvar_eta, self.min_logsigma_t, self.max_logsigma_t)
+        
+        # Sample eta using reparameterization trick
+        eta_samples = self.reparameterize(mu_eta, logvar_eta)
+        
+        return eta_samples, mu_eta, logvar_eta
+    
+    def compute_temporal_kl(self, mu_eta, logvar_eta):
+        '''
+        Compute KL divergence between variational distribution q(eta) and prior p(eta)
+        KL(q(eta|mu,sigma) || p(eta|0,delta)) for each time step
+        
+        Args:
+            mu_eta: T x K tensor, means of variational distribution
+            logvar_eta: T x K tensor, log-variances of variational distribution
+        
+        Returns:
+            kl_loss: scalar, total KL divergence
+        '''
+        # Prior: N(0, delta)
+        # KL for Gaussian: 0.5 * sum(sigma^2/delta + mu^2/delta - 1 - log(sigma^2/delta))
+        var_eta = torch.exp(logvar_eta)
+        kl = 0.5 * torch.sum(
+            var_eta / self.delta + 
+            mu_eta.pow(2) / self.delta - 
+            1 - 
+            torch.log(var_eta / self.delta)
+        )
+        return kl
+    
+    def generate_temporal_word_distributions(self, corpus=None):
+        '''
+        Generate time-varying word distributions for temporal modeling
+        This creates a T x V matrix where each row represents the vocabulary
+        distribution at a specific time step.
+        
+        Args:
+            corpus: Corpus object with temporal metadata (optional)
+        
+        Returns:
+            time_step_data: T x V tensor
+        '''
+        if not self.enable_temporal:
+            raise ValueError("Temporal inference is not enabled")
+        
+        # Initialize time step data
+        V_guided = self.V[self.guided_modality]
+        time_step_data = torch.zeros(self.T, V_guided, dtype=torch.double, device=device)
+        
+        # For now, create simple aggregated distributions per time bin
+        # In a real implementation, this would use actual temporal metadata from corpus
+        # Each time bin gets an equal share of the vocabulary
+        for t in range(self.T):
+            # Uniform distribution as placeholder
+            # In practice, this should aggregate word counts from documents in time bin t
+            time_step_data[t] = torch.ones(V_guided, dtype=torch.double, device=device) / V_guided
+        
+        return time_step_data
 
     def inference(self, max_epoch=5, save_every=1):
         '''
