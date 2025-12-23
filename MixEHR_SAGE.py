@@ -71,35 +71,50 @@ class MixEHR_SAGE(nn.Module):
         self.enable_temporal = enable_temporal
         self.num_time_steps = num_time_steps
 
-        # temporal inference component
+        # temporal inference component with Markov chain over theta
         if self.enable_temporal:
-            self.T = num_time_steps  # number of time steps
-            # Initialize eta as T x K matrix for temporal hyperparameters
-            self.eta = torch.rand(self.T, self.K, dtype=torch.double, requires_grad=True, device=device)
+            self.T = num_time_steps  # number of time steps per patient sequence
             
-            # variational distribution for eta via amortization, eta is T x K matrix
-            self.eta_hidden_size = 200  # number of hidden units for rnn
-            self.eta_dropout = 0.0  # dropout rate on rnn for eta
-            self.eta_nlayers = 3  # number of layers for eta
-            self.delta = 0.01  # prior variance
+            # Storage for temporal theta: D x T x K (document x time x topics)
+            # Each patient can have multiple time steps, storing theta_t for each t
+            self.theta_temporal = torch.zeros(self.D, self.T, self.K, dtype=torch.double, 
+                                             requires_grad=False, device=device)
             
-            # LSTM network for temporal inference
-            # Input: vocabulary distribution at each time step
-            self.q_eta_map = nn.Linear(self.V[self.guided_modality], self.eta_hidden_size)
-            self.q_eta = nn.LSTM(self.eta_hidden_size, self.eta_hidden_size, self.eta_nlayers, 
-                                dropout=self.eta_dropout, batch_first=True)
-            self.mu_q_eta = nn.Linear(self.eta_hidden_size + self.K, self.K, bias=True)
-            self.logsigma_q_eta = nn.Linear(self.eta_hidden_size + self.K, self.K, bias=True)
+            # Track which time steps have data for each patient
+            self.patient_time_mask = torch.zeros(self.D, self.T, dtype=torch.bool, device=device)
             
-            # optimizer for LSTM parameters
+            # VAE architecture for q(theta_t | X_1...t-1, theta_t-1)
+            self.theta_hidden_size = 200  # hidden units for VAE encoder
+            self.theta_dropout = 0.1  # dropout rate
+            self.theta_nlayers = 3  # number of LSTM layers
+            
+            # Markov chain transition variance: p(theta_t | theta_t-1) ~ N(theta_t-1, sigma^2)
+            self.transition_variance = 0.01  # variance for Markov transition
+            
+            # VAE Encoder: processes sequential observations X_1...t-1
+            # Input: aggregated word features for each modality
+            total_vocab_size = sum(self.V)  # aggregate all modalities
+            self.vae_input_map = nn.Linear(total_vocab_size, self.theta_hidden_size)
+            
+            # LSTM processes sequential information
+            self.vae_lstm = nn.LSTM(self.theta_hidden_size, self.theta_hidden_size, 
+                                   self.theta_nlayers, dropout=self.theta_dropout, 
+                                   batch_first=True)
+            
+            # Output layers: concatenate LSTM output with previous theta_t-1
+            self.mu_theta = nn.Linear(self.theta_hidden_size + self.K, self.K, bias=True)
+            self.logsigma_theta = nn.Linear(self.theta_hidden_size + self.K, self.K, bias=True)
+            
+            # optimizer for VAE parameters
             self.clip = 0
             self.lr = 0.0001
             self.wdecay = 1.2e-6
             self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.wdecay)
-            self.max_logsigma_t = 5.0  # avoid the value to be too big
+            self.max_logsigma_t = 5.0  # avoid numerical issues
             self.min_logsigma_t = -5.0
             
-            print(f"Temporal inference enabled with {self.T} time steps")
+            print(f"Temporal Markov chain inference enabled with {self.T} time steps per patient")
+            print(f"Using VAE with LSTM to model q(theta_t | X_1...t-1, theta_t-1)")
         else:
             # Use scalar alpha_prior for non-temporal inference
             self.T = 1
@@ -317,13 +332,6 @@ class MixEHR_SAGE(nn.Module):
         # self.pi = torch.where(self.pi < 0.95, self.pi, torch.ones(self.K, dtype=torch.double, device=device)*self.pi_init*1.33)
         # print(self.pi.mean())
 
-    def alpha_softplus_act(self):
-        '''
-        Apply softplus activation to eta to get alpha (Dirichlet hyperparameters)
-        Softplus ensures alpha > 0: softplus(x) = log(1 + exp(x))
-        '''
-        return F.softplus(self.eta)
-    
     def reparameterize(self, mu, logvar):
         '''
         Reparameterization trick for sampling from N(mu, var)
@@ -333,12 +341,22 @@ class MixEHR_SAGE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
-    def encode_temporal_sequence(self, time_step_data):
+    def softmax_stable(self, x, dim=-1):
         '''
-        Encode temporal sequence data for LSTM input
+        Numerically stable softmax to ensure theta sums to 1
+        '''
+        x_max = torch.max(x, dim=dim, keepdim=True)[0]
+        exp_x = torch.exp(x - x_max)
+        return exp_x / (torch.sum(exp_x, dim=dim, keepdim=True) + mini_val)
+    
+    def encode_observation_sequence(self, patient_sequence_data):
+        '''
+        Encode observation sequence X_1...t for VAE encoder
         
         Args:
-            time_step_data: T x V tensor, vocabulary distribution at each time step
+            patient_sequence_data: List of T dictionaries, each containing word distributions
+                                  for all modalities at time t
+                                  Format: [{modality_0: BOW_tensor, modality_1: BOW_tensor}, ...]
         
         Returns:
             encoded: T x hidden_size tensor
@@ -346,108 +364,187 @@ class MixEHR_SAGE(nn.Module):
         if not self.enable_temporal:
             raise ValueError("Temporal inference is not enabled")
         
-        # Map vocabulary distributions to hidden space
-        # time_step_data shape: (T, V[guided_modality])
-        encoded = self.q_eta_map(time_step_data.float())  # (T, eta_hidden_size)
+        T_actual = len(patient_sequence_data)
+        encoded = torch.zeros(T_actual, self.theta_hidden_size, dtype=torch.float, device=device)
+        
+        # Encode each time step's observation
+        for t, obs_t in enumerate(patient_sequence_data):
+            # Concatenate all modalities into single feature vector
+            combined_features = []
+            for m in range(self.modaltiy_num):
+                if m in obs_t:
+                    # obs_t[m] is a BOW vector of size V[m]
+                    combined_features.append(obs_t[m].float())
+                else:
+                    # If modality not present, use zeros
+                    combined_features.append(torch.zeros(self.V[m], dtype=torch.float, device=device))
+            
+            # Concatenate all modalities
+            combined = torch.cat(combined_features, dim=0)  # size: sum(V)
+            encoded[t] = self.vae_input_map(combined)  # map to hidden size
+        
         return encoded
     
-    def infer_eta_variational(self, time_step_data):
+    def infer_theta_variational(self, patient_sequence_data, patient_id):
         '''
-        Variational inference for eta (temporal hyperparameters) using LSTM
+        VAE-based variational inference for theta_t using Markov chain
+        q(theta_t | X_1...t-1, theta_t-1) with LSTM encoder
         
         Args:
-            time_step_data: T x V tensor, word distributions at each time step
+            patient_sequence_data: List of observations at each time step
+            patient_id: Index of the patient (document ID)
         
         Returns:
-            eta_samples: T x K tensor, sampled eta values
-            mu_eta: T x K tensor, means of variational distribution
-            logvar_eta: T x K tensor, log-variances of variational distribution
+            theta_samples: T x K tensor, sampled theta values (normalized topic distributions)
+            mu_theta: T x K tensor, means of variational distribution (before softmax)
+            logvar_theta: T x K tensor, log-variances of variational distribution
         '''
         if not self.enable_temporal:
             raise ValueError("Temporal inference is not enabled")
         
-        # Encode input sequence
-        # time_step_data: (T, V) -> encoded: (T, hidden_size)
-        encoded = self.encode_temporal_sequence(time_step_data)
+        T_actual = len(patient_sequence_data)
+        
+        # Encode observation sequence
+        encoded = self.encode_observation_sequence(patient_sequence_data)  # (T, hidden_size)
         
         # Add batch dimension for LSTM: (1, T, hidden_size)
         encoded = encoded.unsqueeze(0)
         
-        # LSTM forward pass
-        lstm_out, _ = self.q_eta(encoded)  # (1, T, hidden_size)
+        # LSTM forward pass to capture sequential dependencies
+        lstm_out, _ = self.vae_lstm(encoded)  # (1, T, hidden_size)
         lstm_out = lstm_out.squeeze(0)  # (T, hidden_size)
         
-        # Concatenate with previous eta for autoregressive modeling
-        # For the first time step, use zeros
-        prev_eta = torch.zeros(self.T, self.K, dtype=torch.float, device=device)
-        prev_eta[1:] = self.eta[:-1].clone().detach().float()  # Shift eta by one time step
+        # Initialize storage for theta samples
+        theta_samples = torch.zeros(T_actual, self.K, dtype=torch.double, device=device)
+        mu_theta = torch.zeros(T_actual, self.K, dtype=torch.float, device=device)
+        logvar_theta = torch.zeros(T_actual, self.K, dtype=torch.float, device=device)
         
-        # Concatenate LSTM output with previous eta
-        lstm_eta_concat = torch.cat([lstm_out, prev_eta], dim=1)  # (T, hidden_size + K)
+        # Sequentially generate theta_t conditioned on theta_t-1
+        for t in range(T_actual):
+            if t == 0:
+                # First time step: use alpha_prior as initial distribution
+                prev_theta = torch.full((self.K,), self.alpha_prior, dtype=torch.float, device=device)
+            else:
+                # Use previous theta_t-1
+                prev_theta = theta_samples[t-1].float()
+            
+            # Concatenate LSTM output with previous theta
+            lstm_theta_concat = torch.cat([lstm_out[t], prev_theta], dim=0)  # (hidden_size + K)
+            
+            # Compute variational parameters
+            mu_t = self.mu_theta(lstm_theta_concat)  # (K)
+            logvar_t = self.logsigma_theta(lstm_theta_concat)  # (K)
+            
+            # Clip log variance
+            logvar_t = torch.clamp(logvar_t, self.min_logsigma_t, self.max_logsigma_t)
+            
+            # Sample using reparameterization trick
+            theta_unnorm = self.reparameterize(mu_t, logvar_t)
+            
+            # Apply softmax to ensure theta is a valid probability distribution
+            theta_t = self.softmax_stable(theta_unnorm)
+            
+            theta_samples[t] = theta_t.double()
+            mu_theta[t] = mu_t
+            logvar_theta[t] = logvar_t
+            
+            # Store theta_t for this patient and time step
+            self.theta_temporal[patient_id, t] = theta_t.double()
+            self.patient_time_mask[patient_id, t] = True
         
-        # Compute variational parameters
-        mu_eta = self.mu_q_eta(lstm_eta_concat)  # (T, K)
-        logvar_eta = self.logsigma_q_eta(lstm_eta_concat)  # (T, K)
-        
-        # Clip log variance to avoid numerical issues
-        logvar_eta = torch.clamp(logvar_eta, self.min_logsigma_t, self.max_logsigma_t)
-        
-        # Sample eta using reparameterization trick
-        eta_samples = self.reparameterize(mu_eta, logvar_eta)
-        
-        return eta_samples, mu_eta, logvar_eta
+        return theta_samples, mu_theta, logvar_theta
     
-    def compute_temporal_kl(self, mu_eta, logvar_eta):
+    def compute_markov_chain_kl(self, theta_samples, mu_theta, logvar_theta):
         '''
-        Compute KL divergence between variational distribution q(eta) and prior p(eta)
-        KL(q(eta|mu,sigma) || p(eta|0,delta)) for each time step
+        Compute KL divergence for Markov chain: KL(q(theta_t | theta_t-1, X) || p(theta_t | theta_t-1))
+        
+        For t=0: KL(q(theta_0) || p(theta_0 | alpha_prior))
+        For t>0: KL(q(theta_t | theta_t-1, X) || p(theta_t | theta_t-1))
+        
+        Markov prior: p(theta_t | theta_t-1) ~ N(theta_t-1, transition_variance * I)
         
         Args:
-            mu_eta: T x K tensor, means of variational distribution
-            logvar_eta: T x K tensor, log-variances of variational distribution
+            theta_samples: T x K tensor, sampled theta values
+            mu_theta: T x K tensor, means of variational distribution
+            logvar_theta: T x K tensor, log-variances
         
         Returns:
             kl_loss: scalar, total KL divergence
         '''
-        # Prior: N(0, delta)
-        # KL for Gaussian: 0.5 * sum(sigma^2/delta + mu^2/delta - 1 - log(sigma^2/delta))
-        var_eta = torch.exp(logvar_eta)
-        kl = 0.5 * torch.sum(
-            var_eta / self.delta + 
-            mu_eta.pow(2) / self.delta - 
-            1 - 
-            torch.log(var_eta / self.delta)
-        )
-        return kl
+        T_actual = theta_samples.shape[0]
+        kl_total = 0.0
+        
+        for t in range(T_actual):
+            var_q = torch.exp(logvar_theta[t])
+            
+            if t == 0:
+                # First time step: KL with alpha_prior
+                # KL(N(mu, sigma) || N(alpha_prior, delta))
+                prior_mean = torch.full((self.K,), self.alpha_prior, dtype=torch.float, device=device)
+                prior_var = self.transition_variance
+                
+                kl_t = 0.5 * torch.sum(
+                    var_q / prior_var +
+                    (mu_theta[t] - prior_mean).pow(2) / prior_var -
+                    1 -
+                    torch.log(var_q / prior_var)
+                )
+            else:
+                # Subsequent time steps: KL with previous theta
+                # p(theta_t | theta_t-1) ~ N(theta_t-1, transition_variance)
+                prior_mean = theta_samples[t-1].float()
+                prior_var = self.transition_variance
+                
+                kl_t = 0.5 * torch.sum(
+                    var_q / prior_var +
+                    (mu_theta[t] - prior_mean).pow(2) / prior_var -
+                    1 -
+                    torch.log(var_q / prior_var)
+                )
+            
+            kl_total += kl_t
+        
+        return kl_total
     
-    def generate_temporal_word_distributions(self, corpus=None):
+    def get_theta_at_time(self, patient_id, time_step):
         '''
-        Generate time-varying word distributions for temporal modeling
-        This creates a T x V matrix where each row represents the vocabulary
-        distribution at a specific time step.
+        Retrieve stored theta for a specific patient at a specific time step
         
         Args:
-            corpus: Corpus object with temporal metadata (optional)
+            patient_id: Document/patient ID
+            time_step: Time step index (0 to T-1)
         
         Returns:
-            time_step_data: T x V tensor
+            theta: K-dimensional topic distribution, or None if not available
         '''
         if not self.enable_temporal:
-            raise ValueError("Temporal inference is not enabled")
+            return None
         
-        # Initialize time step data
-        V_guided = self.V[self.guided_modality]
-        time_step_data = torch.zeros(self.T, V_guided, dtype=torch.double, device=device)
+        if self.patient_time_mask[patient_id, time_step]:
+            return self.theta_temporal[patient_id, time_step]
+        else:
+            return None
+    
+    def save_temporal_theta(self, save_path):
+        '''
+        Save all temporal theta values to disk
         
-        # For now, create simple aggregated distributions per time bin
-        # In a real implementation, this would use actual temporal metadata from corpus
-        # Each time bin gets an equal share of the vocabulary
-        for t in range(self.T):
-            # Uniform distribution as placeholder
-            # In practice, this should aggregate word counts from documents in time bin t
-            time_step_data[t] = torch.ones(V_guided, dtype=torch.double, device=device) / V_guided
+        Args:
+            save_path: Path to save the temporal theta tensor
+        '''
+        if not self.enable_temporal:
+            print("Temporal inference not enabled, nothing to save")
+            return
         
-        return time_step_data
+        save_dict = {
+            'theta_temporal': self.theta_temporal.cpu(),
+            'patient_time_mask': self.patient_time_mask.cpu(),
+            'num_time_steps': self.T,
+            'num_patients': self.D,
+            'num_topics': self.K
+        }
+        torch.save(save_dict, save_path)
+        print(f"Saved temporal theta to {save_path}")
 
     def inference(self, max_epoch=5, save_every=1):
         '''
