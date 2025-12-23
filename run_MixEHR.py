@@ -93,6 +93,17 @@ Data Directory Requirements:
         action='store_true',
         help='Skip prior computation step (use existing priors)'
     )
+    parser.add_argument(
+        '--enable-temporal',
+        action='store_true',
+        help='Enable temporal Markov chain inference for disease progression modeling'
+    )
+    parser.add_argument(
+        '--num-time-steps',
+        type=int,
+        default=10,
+        help='Maximum number of time steps per patient for temporal modeling (default: 10)'
+    )
 
     args = parser.parse_args()
 
@@ -138,13 +149,20 @@ Data Directory Requirements:
         print("Skipping prior computation step...")
 
     # 3) Fit the model
-    run([python] + common_flags + [
+    model_cmd = [python] + common_flags + [
         "main.py",
         args.store,
         args.output,
         "-epoch", str(args.epochs),
         "-batch_size", str(args.batch_size)
-    ])
+    ]
+    
+    # Add temporal parameters if enabled
+    if args.enable_temporal:
+        model_cmd.extend(["-enable_temporal"])
+        model_cmd.extend(["-num_time_steps", str(args.num_time_steps)])
+    
+    run(model_cmd)
 
     print(f"\nPipeline completed successfully!")
     print(f"Results saved to: {args.output}")
