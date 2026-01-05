@@ -66,6 +66,10 @@ class MixedTemporalDataProcessor:
         """
         df = pd.read_csv(self.data_dir / modality_path)
         
+        # Ensure patient_id is integer for consistent comparisons
+        if 'patient_id' in df.columns:
+            df['patient_id'] = df['patient_id'].astype(int)
+        
         # Convert date to datetime if present
         if date_column in df.columns:
             df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
@@ -82,6 +86,11 @@ class MixedTemporalDataProcessor:
         Where time_bin = {0: baseline, 1: first_visit, 2: second_visit, 3: third_visit}
         """
         df = pd.read_csv(self.data_dir / modality_path)
+        
+        # Ensure patient_id is integer for consistent comparisons
+        if 'patient_id' in df.columns:
+            df['patient_id'] = df['patient_id'].astype(int)
+        
         return df
     
     def align_temporal_data(self, patient_id: int, 
@@ -124,9 +133,15 @@ class MixedTemporalDataProcessor:
                 visit_dates.extend(dates)
                 dated_records[mod_name] = patient_df
         
-        # Sort unique visit dates
+        # Sort unique visit dates, filtering out NaT (Not a Time) values
         if visit_dates:
-            visit_dates = sorted(set(visit_dates))
+            # Remove NaT values before sorting
+            valid_dates = [d for d in visit_dates if pd.notna(d)]
+            if valid_dates:
+                visit_dates = sorted(set(valid_dates))
+            else:
+                # If all dates were invalid, fallback to time bins
+                visit_dates = list(range(4))
         else:
             # If no dated data, use time bins directly
             # Assume 4 time bins map to 4 visits
