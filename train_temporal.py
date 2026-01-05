@@ -255,9 +255,9 @@ class MixedTemporalDataProcessor:
         
         for mod_name, row in self.metadata.iterrows():
             path = row['path']
-            # Explicitly specify dtype for patient_id and time_bin columns during CSV reading
-            # This prevents pandas from reading them as strings
-            dtype_spec = {'patient_id': int}
+            # Specify dtype only for time_bin if present
+            # patient_id should remain as-is (identifier, not array index)
+            dtype_spec = {}
             # Check if file has time_bin column by reading first line
             try:
                 sample_df = pd.read_csv(self.data_dir / path, nrows=0)
@@ -265,7 +265,7 @@ class MixedTemporalDataProcessor:
                     dtype_spec['time_bin'] = int
             except:
                 pass
-            df = pd.read_csv(self.data_dir / path, dtype=dtype_spec)
+            df = pd.read_csv(self.data_dir / path, dtype=dtype_spec if dtype_spec else None)
             
             if 'date' in df.columns:
                 # Convert date to datetime
@@ -278,7 +278,7 @@ class MixedTemporalDataProcessor:
                 # Default: treat as single time point
                 binned_mods[mod_name] = df
         
-        # Get all patient IDs (already integers from dtype specification)
+        # Get all unique patient IDs (as-is from CSV, identifiers not array indices)
         all_patients = set()
         for df in list(dated_mods.values()) + list(binned_mods.values()):
             all_patients.update(df['patient_id'].unique())
