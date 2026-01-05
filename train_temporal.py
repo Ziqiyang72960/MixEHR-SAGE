@@ -213,7 +213,13 @@ class MixedTemporalDataProcessor:
             path = row['path']
             df = pd.read_csv(self.data_dir / path)
             
+            # Ensure patient_id is integer for consistent comparisons
+            if 'patient_id' in df.columns:
+                df['patient_id'] = df['patient_id'].astype(int)
+            
             if 'date' in df.columns:
+                # Convert date to datetime
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
                 dated_mods[mod_name] = df
             elif 'time_bin' in df.columns:
                 binned_mods[mod_name] = df
@@ -221,7 +227,7 @@ class MixedTemporalDataProcessor:
                 # Default: treat as single time point
                 binned_mods[mod_name] = df
         
-        # Get all patient IDs
+        # Get all patient IDs (will now be integers)
         all_patients = set()
         for df in list(dated_mods.values()) + list(binned_mods.values()):
             all_patients.update(df['patient_id'].unique())
