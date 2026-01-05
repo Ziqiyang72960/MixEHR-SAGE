@@ -215,19 +215,24 @@ class MixedTemporalDataProcessor:
         
         for mod_name, row in self.metadata.iterrows():
             path = row['path']
-            # Explicitly specify dtype for patient_id column during CSV reading
-            df = pd.read_csv(self.data_dir / path, dtype={'patient_id': int})
+            # Explicitly specify dtype for patient_id and time_bin columns during CSV reading
+            # This prevents pandas from reading them as strings
+            dtype_spec = {'patient_id': int}
+            # Check if file has time_bin column by reading first line
+            try:
+                sample_df = pd.read_csv(self.data_dir / path, nrows=0)
+                if 'time_bin' in sample_df.columns:
+                    dtype_spec['time_bin'] = int
+            except:
+                pass
+            df = pd.read_csv(self.data_dir / path, dtype=dtype_spec)
             
             if 'date' in df.columns:
                 # Convert date to datetime
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
-                # Ensure time_bin is int if present
-                if 'time_bin' in df.columns:
-                    df['time_bin'] = df['time_bin'].astype(int)
                 dated_mods[mod_name] = df
             elif 'time_bin' in df.columns:
-                # Ensure time_bin is integer for consistent comparisons
-                df['time_bin'] = df['time_bin'].astype(int)
+                # time_bin already int from dtype spec
                 binned_mods[mod_name] = df
             else:
                 # Default: treat as single time point
