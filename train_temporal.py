@@ -168,6 +168,8 @@ class MixedTemporalDataProcessor:
                     words = {}
                     for _, row in patient_data.iterrows():
                         word_id = row['code'] if 'code' in row else row.get('word_id', 0)
+                        # Ensure word_id is integer for proper comparisons
+                        word_id = int(word_id) if not isinstance(word_id, int) else word_id
                         words[word_id] = words.get(word_id, 0) + 1
                     visit_words[mod_id] = words
             
@@ -186,6 +188,8 @@ class MixedTemporalDataProcessor:
                     words = {}
                     for _, row in bin_data.iterrows():
                         word_id = row['code'] if 'code' in row else row.get('word_id', 0)
+                        # Ensure word_id is integer for proper comparisons
+                        word_id = int(word_id) if not isinstance(word_id, int) else word_id
                         words[word_id] = words.get(word_id, 0) + 1
                     visit_words[mod_id] = words
             
