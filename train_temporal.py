@@ -248,7 +248,7 @@ def load_corpus_and_seeds(data_dir: str, metadata_path: str):
     # Mock vocabulary sizes (should be computed from data)
     vocab_sizes = [1000, 500, 300]  # ICD, medication, OPCS
     
-    # Create mock corpus
+    # Create mock corpus with PyTorch DataLoader compatibility
     class MockCorpus:
         def __init__(self):
             self.D = num_patients
@@ -256,6 +256,26 @@ def load_corpus_and_seeds(data_dir: str, metadata_path: str):
             # C is total word count per modality across all documents
             # Estimate: ~20 words per patient per modality on average
             self.C = [num_patients * 20 for _ in vocab_sizes]
+            
+            # Create mock documents for DataLoader compatibility
+            from corpus import Corpus
+            self.documents = []
+            for doc_id in range(self.D):
+                doc = Corpus.Document(doc_id, modality_num=len(vocab_sizes))
+                # Add some mock words to each document
+                for m, vocab_size in enumerate(vocab_sizes):
+                    num_words = np.random.randint(10, 30)
+                    for _ in range(num_words):
+                        word_id = np.random.randint(0, vocab_size)
+                        freq = np.random.randint(1, 5)
+                        doc.append_record(word_id, freq, m)
+                self.documents.append(doc)
+        
+        def __len__(self):
+            return self.D
+        
+        def __getitem__(self, idx):
+            return self.documents[idx]
     
     corpus = MockCorpus()
     
