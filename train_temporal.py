@@ -238,14 +238,16 @@ class MixedTemporalDataProcessor:
         
         return vocab_sizes
     
-    def process_all_patients(self) -> Tuple[Dict, Dict, List[int]]:
+    def process_all_patients(self, vocab_sizes: List[int]) -> Tuple[Dict, Dict]:
         """
         Process all patients and create sequential data
+        
+        Args:
+            vocab_sizes: List of vocabulary sizes per modality
         
         Returns:
             patient_sequences: Dict mapping patient_id to visit list
             patient_metadata: Dict with patient information
-            vocab_sizes: List of vocabulary sizes per modality
         """
         # Categorize modalities by temporal type
         dated_mods = {}  # ICD, OPCS with dates
@@ -277,7 +279,7 @@ class MixedTemporalDataProcessor:
                 binned_mods[mod_name] = df
         
         # Build vocabularies BEFORE processing patients
-        vocab_sizes = self.build_vocabularies(dated_mods, binned_mods)
+        self.build_vocabularies(dated_mods, binned_mods)
         
         # Get all unique patient IDs (as-is from CSV, identifiers not array indices)
         all_patients = set()
@@ -300,7 +302,7 @@ class MixedTemporalDataProcessor:
                 }
         
         print(f"Processed {len(patient_sequences)} patients with temporal data")
-        return patient_sequences, patient_metadata, vocab_sizes
+        return patient_sequences, patient_metadata
 
 
 def load_corpus_and_seeds(data_dir: str, metadata_path: str):
@@ -384,7 +386,7 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
     
     # Process temporal data
     processor = MixedTemporalDataProcessor(data_dir, metadata_path)
-    patient_sequences, patient_metadata, vocab_sizes = processor.process_all_patients()
+    patient_sequences, patient_metadata = processor.process_all_patients(vocab_sizes)
     
     print(f"\nTemporal data:")
     print(f"  Patients with sequences: {len(patient_sequences)}")
