@@ -480,8 +480,8 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
         pickle.dump({
             'patient_sequences': patient_sequences,
             'patient_metadata': patient_metadata,
-            'theta_temporal': model.theta_temporal.cpu().numpy(),
-            'patient_time_mask': model.patient_time_mask.cpu().numpy(),
+            'theta_temporal': model.theta_temporal.detach().cpu().numpy(),
+            'patient_time_mask': model.patient_time_mask.detach().cpu().numpy(),
             'patient_id_to_idx': patient_id_to_idx  # Save the mapping
         }, f)
     print(f"Saved results to {results_path}")
