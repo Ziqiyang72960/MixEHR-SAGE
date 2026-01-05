@@ -91,6 +91,10 @@ class MixedTemporalDataProcessor:
         if 'patient_id' in df.columns:
             df['patient_id'] = df['patient_id'].astype(int)
         
+        # Ensure time_bin is integer for consistent comparisons
+        if time_col in df.columns:
+            df[time_col] = df[time_col].astype(int)
+        
         return df
     
     def align_temporal_data(self, patient_id: int, 
@@ -222,6 +226,8 @@ class MixedTemporalDataProcessor:
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
                 dated_mods[mod_name] = df
             elif 'time_bin' in df.columns:
+                # Ensure time_bin is integer for consistent comparisons
+                df['time_bin'] = df['time_bin'].astype(int)
                 binned_mods[mod_name] = df
             else:
                 # Default: treat as single time point
