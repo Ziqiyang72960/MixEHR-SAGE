@@ -2,11 +2,17 @@
 import torch
 import numpy as np
 from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from pathlib import Path
+
+# Get absolute path to repository root
+root_dir = Path(__file__).resolve().parent.parent
+phecode_mapping_dir = root_dir / "phecode_mapping"
+guide_prior_dir = root_dir / "guide_prior"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-seeds_topic_matrix = torch.load("../phecode_mapping/seed_topic_matrix.pt", map_location=device, weights_only=False) # get seed word-topic mapping, V x K matrix
+seeds_topic_matrix = torch.load(phecode_mapping_dir / "seed_topic_matrix.pt", map_location=device, weights_only=False) # get seed word-topic mapping, V x K matrix
 V, K = seeds_topic_matrix.shape
-document_phecode_matrix = torch.load("../guide_prior/document_phecode_matrix.pt", map_location=device, weights_only=False)  # get document-PheCode counts, D x K matrix
+document_phecode_matrix = torch.load(guide_prior_dir / "document_phecode_matrix.pt", map_location=device, weights_only=False)  # get document-PheCode counts, D x K matrix
 document_phecode_matrix = document_phecode_matrix.cpu().detach().numpy()
 D, K = document_phecode_matrix.shape
 print(document_phecode_matrix.shape)
@@ -26,5 +32,5 @@ for k in range(K):
 
 alpha_prior = alpha_prior / alpha_prior.sum(axis=1, keepdims=1) + 1e-5 # normalization over K for each document
 alpha_prior = torch.tensor(alpha_prior)
-torch.save(alpha_prior, "../guide_prior/topic_prior_alpha.pt")
+torch.save(alpha_prior, guide_prior_dir / "topic_prior_alpha.pt")
 
