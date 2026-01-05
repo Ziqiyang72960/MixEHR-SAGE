@@ -236,7 +236,8 @@ class MixedTemporalDataProcessor:
         # Get all patient IDs (will now be integers)
         all_patients = set()
         for df in list(dated_mods.values()) + list(binned_mods.values()):
-            all_patients.update(df['patient_id'].unique())
+            # Explicitly convert to int to handle any edge cases
+            all_patients.update(int(pid) for pid in df['patient_id'].unique())
         
         patient_sequences = {}
         patient_metadata = {}
