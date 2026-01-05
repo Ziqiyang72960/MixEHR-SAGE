@@ -1,5 +1,4 @@
 # For each document, compute the count of ICD code under each PheCodes
-import time
 import torch
 import pickle
 import pandas as pd
@@ -33,7 +32,6 @@ for d_i, doc in enumerate(c.dataset):
 df = pd.DataFrame(pat_d, columns=['SUBJECT_ID'])
 df.to_csv(guide_prior_dir / 'pat_df.csv')
 print('done')
-time.sleep(200)
 
 print('obtain D x K document-PheCode count matrix')
 document_phecode_matrix = torch.zeros((c.D, K), device=device) # document-PheCode counts, D x K matrix
