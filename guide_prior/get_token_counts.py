@@ -1,7 +1,6 @@
 # compute the initialized expected sufficient statistics for each modalities based on topic prior alpha
 # Dynamically handles any number of modalities based on corpus modalities list
 import torch
-import os
 import sys
 from pathlib import Path
 
