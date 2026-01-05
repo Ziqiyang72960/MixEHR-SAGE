@@ -215,15 +215,15 @@ class MixedTemporalDataProcessor:
         
         for mod_name, row in self.metadata.iterrows():
             path = row['path']
-            df = pd.read_csv(self.data_dir / path)
-            
-            # Ensure patient_id is integer for consistent comparisons
-            if 'patient_id' in df.columns:
-                df['patient_id'] = df['patient_id'].astype(int)
+            # Explicitly specify dtype for patient_id column during CSV reading
+            df = pd.read_csv(self.data_dir / path, dtype={'patient_id': int})
             
             if 'date' in df.columns:
                 # Convert date to datetime
                 df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                # Ensure time_bin is int if present
+                if 'time_bin' in df.columns:
+                    df['time_bin'] = df['time_bin'].astype(int)
                 dated_mods[mod_name] = df
             elif 'time_bin' in df.columns:
                 # Ensure time_bin is integer for consistent comparisons
@@ -233,11 +233,10 @@ class MixedTemporalDataProcessor:
                 # Default: treat as single time point
                 binned_mods[mod_name] = df
         
-        # Get all patient IDs (will now be integers)
+        # Get all patient IDs (already integers from dtype specification)
         all_patients = set()
         for df in list(dated_mods.values()) + list(binned_mods.values()):
-            # Explicitly convert to int to handle any edge cases
-            all_patients.update(int(pid) for pid in df['patient_id'].unique())
+            all_patients.update(df['patient_id'].unique())
         
         patient_sequences = {}
         patient_metadata = {}
