@@ -56,6 +56,7 @@ class MixedTemporalDataProcessor:
         self.data_dir = Path(data_dir)
         self.metadata_path = metadata_path
         self.metadata = pd.read_csv(metadata_path, index_col='index')
+        self.vocabularies = {}  # Store code -> integer ID mappings
         
     def load_dated_modality(self, modality_path: str, date_column: str = 'date') -> pd.DataFrame:
         """
@@ -167,9 +168,14 @@ class MixedTemporalDataProcessor:
                 if len(patient_data) > 0:
                     words = {}
                     for _, row in patient_data.iterrows():
-                        word_id = row['code'] if 'code' in row else row.get('word_id', 0)
-                        # Ensure word_id is integer for proper comparisons
-                        word_id = int(word_id) if not isinstance(word_id, int) else word_id
+                        code = row['code'] if 'code' in row else row.get('word_id', 0)
+                        # Map string code to integer ID using vocabulary
+                        if mod_id in self.vocabularies and code in self.vocabularies[mod_id]:
+                            word_id = self.vocabularies[mod_id][code]
+                        elif isinstance(code, int):
+                            word_id = code
+                        else:
+                            continue  # Skip unknown codes
                         words[word_id] = words.get(word_id, 0) + 1
                     visit_words[mod_id] = words
             
@@ -187,9 +193,14 @@ class MixedTemporalDataProcessor:
                 if len(bin_data) > 0:
                     words = {}
                     for _, row in bin_data.iterrows():
-                        word_id = row['code'] if 'code' in row else row.get('word_id', 0)
-                        # Ensure word_id is integer for proper comparisons
-                        word_id = int(word_id) if not isinstance(word_id, int) else word_id
+                        code = row['code'] if 'code' in row else row.get('word_id', 0)
+                        # Map string code to integer ID using vocabulary
+                        if mod_id in self.vocabularies and code in self.vocabularies[mod_id]:
+                            word_id = self.vocabularies[mod_id][code]
+                        elif isinstance(code, int):
+                            word_id = code
+                        else:
+                            continue  # Skip unknown codes
                         words[word_id] = words.get(word_id, 0) + 1
                     visit_words[mod_id] = words
             
@@ -201,6 +212,31 @@ class MixedTemporalDataProcessor:
                 })
         
         return visits
+    
+    def build_vocabularies(self, dated_data: Dict[str, pd.DataFrame], 
+                          binned_data: Dict[str, pd.DataFrame]) -> List[int]:
+        """
+        Build vocabulary mappings from all codes in the data
+        
+        Returns:
+            vocab_sizes: List of vocabulary sizes per modality
+        """
+        all_modalities = list(dated_data.items()) + list(binned_data.items())
+        vocab_sizes = []
+        
+        for mod_id, (mod_name, df) in enumerate(all_modalities):
+            # Collect all unique codes for this modality
+            if 'code' in df.columns:
+                unique_codes = df['code'].unique()
+                # Build mapping: code_string -> integer_id
+                code_to_id = {code: idx for idx, code in enumerate(unique_codes)}
+                self.vocabularies[mod_id] = code_to_id
+                vocab_sizes.append(len(code_to_id))
+            else:
+                self.vocabularies[mod_id] = {}
+                vocab_sizes.append(100)  # Default size
+        
+        return vocab_sizes
     
     def process_all_patients(self, vocab_sizes: List[int]) -> Tuple[Dict, Dict]:
         """
