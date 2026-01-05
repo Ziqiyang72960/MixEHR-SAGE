@@ -5,7 +5,6 @@ import pickle
 import pandas as pd
 #from corpus import Corpus
 import sys
-import os
 from pathlib import Path
 
 # Get absolute path to repository root
@@ -19,7 +18,8 @@ phecode_mapping_dir = root_dir / "phecode_mapping"
 store_dir = root_dir / "store"
 guide_prior_dir = root_dir / "guide_prior"
 
-vocab_ids = pickle.load(open(mapping_dir / "icd_vocab_ids.pkl", "rb"))
+with open(mapping_dir / "icd_vocab_ids.pkl", "rb") as f:
+    vocab_ids = pickle.load(f)
 inv_vocab_ids = {v: k for k, v in vocab_ids.items()}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
