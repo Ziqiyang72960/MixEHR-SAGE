@@ -253,7 +253,9 @@ def load_corpus_and_seeds(data_dir: str, metadata_path: str):
         def __init__(self):
             self.D = num_patients
             self.V = vocab_sizes
-            self.C = [sum(vocab_sizes)] * len(vocab_sizes)
+            # C is total word count per modality across all documents
+            # Estimate: ~20 words per patient per modality on average
+            self.C = [num_patients * 20 for _ in vocab_sizes]
     
     corpus = MockCorpus()
     
