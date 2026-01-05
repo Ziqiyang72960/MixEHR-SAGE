@@ -238,16 +238,14 @@ class MixedTemporalDataProcessor:
         
         return vocab_sizes
     
-    def process_all_patients(self, vocab_sizes: List[int]) -> Tuple[Dict, Dict]:
+    def process_all_patients(self) -> Tuple[Dict, Dict, List[int]]:
         """
         Process all patients and create sequential data
-        
-        Args:
-            vocab_sizes: List of vocabulary sizes per modality
         
         Returns:
             patient_sequences: Dict mapping patient_id to visit list
             patient_metadata: Dict with patient information
+            vocab_sizes: List of vocabulary sizes per modality
         """
         # Categorize modalities by temporal type
         dated_mods = {}  # ICD, OPCS with dates
@@ -278,6 +276,9 @@ class MixedTemporalDataProcessor:
                 # Default: treat as single time point
                 binned_mods[mod_name] = df
         
+        # Build vocabularies BEFORE processing patients
+        vocab_sizes = self.build_vocabularies(dated_mods, binned_mods)
+        
         # Get all unique patient IDs (as-is from CSV, identifiers not array indices)
         all_patients = set()
         for df in list(dated_mods.values()) + list(binned_mods.values()):
@@ -299,7 +300,7 @@ class MixedTemporalDataProcessor:
                 }
         
         print(f"Processed {len(patient_sequences)} patients with temporal data")
-        return patient_sequences, patient_metadata
+        return patient_sequences, patient_metadata, vocab_sizes
 
 
 def load_corpus_and_seeds(data_dir: str, metadata_path: str):
@@ -383,7 +384,7 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
     
     # Process temporal data
     processor = MixedTemporalDataProcessor(data_dir, metadata_path)
-    patient_sequences, patient_metadata = processor.process_all_patients(vocab_sizes)
+    patient_sequences, patient_metadata, vocab_sizes = processor.process_all_patients()
     
     print(f"\nTemporal data:")
     print(f"  Patients with sequences: {len(patient_sequences)}")
@@ -474,17 +475,63 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
     }, model_path)
     print(f"Saved model to {model_path}")
     
-    # Save patient-topic mapping
-    results_path = os.path.join(output_dir, 'patient_theta_results.pkl')
-    with open(results_path, 'wb') as f:
+    # Create reverse vocabulary mappings (integer_id -> code)
+    id_to_code_mappings = {}
+    for mod_id, code_to_id in processor.vocabularies.items():
+        id_to_code_mappings[mod_id] = {idx: code for code, idx in code_to_id.items()}
+    
+    # Save vocabulary mappings separately for easy access
+    vocab_path = os.path.join(output_dir, 'vocabularies.pkl')
+    with open(vocab_path, 'wb') as f:
+        pickle.dump({
+            'code_to_id': processor.vocabularies,  # {modality_id: {code_string: integer_id}}
+            'id_to_code': id_to_code_mappings,  # {modality_id: {integer_id: code_string}}
+            'vocab_sizes': vocab_sizes,
+            'modality_names': modality_list
+        }, f)
+    print(f"Saved vocabularies to {vocab_path}")
+    
+    # Save patient ID mapping
+    mapping_path = os.path.join(output_dir, 'patient_id_mapping.pkl')
+    idx_to_patient_id = {idx: pid for pid, idx in patient_id_to_idx.items()}
+    with open(mapping_path, 'wb') as f:
+        pickle.dump({
+            'patient_id_to_idx': patient_id_to_idx,  # {patient_id: array_index}
+            'idx_to_patient_id': idx_to_patient_id,  # {array_index: patient_id}
+            'description': 'Mapping between patient IDs and array indices used in theta_temporal'
+        }, f)
+    print(f"Saved patient ID mapping to {mapping_path}")
+    
+    # Save patient sequences with readable codes
+    sequences_path = os.path.join(output_dir, 'patient_sequences.pkl')
+    with open(sequences_path, 'wb') as f:
         pickle.dump({
             'patient_sequences': patient_sequences,
             'patient_metadata': patient_metadata,
-            'theta_temporal': model.theta_temporal.detach().cpu().numpy(),
-            'patient_time_mask': model.patient_time_mask.detach().cpu().numpy(),
-            'patient_id_to_idx': patient_id_to_idx  # Save the mapping
+            'description': 'Patient visit sequences with word_id as integer indices (use vocabularies.pkl to decode)'
         }, f)
-    print(f"Saved results to {results_path}")
+    print(f"Saved patient sequences to {sequences_path}")
+    
+    # Save theta results with documentation
+    results_path = os.path.join(output_dir, 'theta_results.pkl')
+    theta_array = model.theta_temporal.detach().cpu().numpy()
+    mask_array = model.patient_time_mask.detach().cpu().numpy()
+    
+    with open(results_path, 'wb') as f:
+        pickle.dump({
+            'theta_temporal': theta_array,  # Shape: (num_patients, num_time_steps, num_topics)
+            'patient_time_mask': mask_array,  # Shape: (num_patients, num_time_steps)
+            'patient_id_to_idx': patient_id_to_idx,
+            'idx_to_patient_id': idx_to_patient_id,
+            'num_topics': seeds.shape[1],
+            'num_time_steps': num_time_steps,
+            'description': {
+                'theta_temporal': 'Topic distributions over time. Shape: (num_patients, num_time_steps, num_topics). Use patient_id_to_idx to find row for a patient.',
+                'patient_time_mask': 'Binary mask indicating which time steps have data for each patient. 1=has data, 0=no data.',
+                'usage': 'To get theta for patient_id at time t: theta_temporal[patient_id_to_idx[patient_id], t, :]'
+            }
+        }, f)
+    print(f"Saved theta results to {results_path}")
     
     return model, patient_sequences, patient_metadata
 
