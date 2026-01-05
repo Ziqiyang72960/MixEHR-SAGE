@@ -408,6 +408,10 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
     # Create data loader
     loader = SequenceDataLoader(patient_sequences, vocab_sizes)
     
+    # Create mapping from patient_id to array index
+    patient_ids_list = list(patient_sequences.keys())
+    patient_id_to_idx = {pid: idx for idx, pid in enumerate(patient_ids_list)}
+    
     # Training loop
     print(f"\nTraining for {epochs} epochs...")
     for epoch in range(epochs):
@@ -428,9 +432,12 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
                     # Get patient sequence
                     seq_data = loader.get_patient_sequence_data(patient_id)
                     
-                    # Perform VAE inference
+                    # Map patient_id to array index
+                    patient_idx = patient_id_to_idx[patient_id]
+                    
+                    # Perform VAE inference (use array index, not patient_id)
                     theta_samples, mu, logvar = model.infer_theta_variational(
-                        seq_data, patient_id
+                        seq_data, patient_idx
                     )
                     
                     # Compute KL divergence
@@ -474,7 +481,8 @@ def train_temporal_model(data_dir: str, metadata_path: str, output_dir: str,
             'patient_sequences': patient_sequences,
             'patient_metadata': patient_metadata,
             'theta_temporal': model.theta_temporal.cpu().numpy(),
-            'patient_time_mask': model.patient_time_mask.cpu().numpy()
+            'patient_time_mask': model.patient_time_mask.cpu().numpy(),
+            'patient_id_to_idx': patient_id_to_idx  # Save the mapping
         }, f)
     print(f"Saved results to {results_path}")
     
@@ -521,6 +529,10 @@ def infer_new_patients(model_path: str, data_dir: str, metadata_path: str,
     # Create data loader
     loader = SequenceDataLoader(patient_sequences, vocab_sizes)
     
+    # Create mapping from patient_id to array index
+    patient_ids_list = list(patient_sequences.keys())
+    patient_id_to_idx = {pid: idx for idx, pid in enumerate(patient_ids_list)}
+    
     # Inference
     print(f"\nInferring theta for {len(patient_sequences)} patients...")
     results = {}
@@ -528,7 +540,11 @@ def infer_new_patients(model_path: str, data_dir: str, metadata_path: str,
     for patient_id in patient_sequences.keys():
         try:
             seq_data = loader.get_patient_sequence_data(patient_id)
-            theta_samples, mu, logvar = model.infer_theta_variational(seq_data, patient_id)
+            
+            # Map patient_id to array index
+            patient_idx = patient_id_to_idx[patient_id]
+            
+            theta_samples, mu, logvar = model.infer_theta_variational(seq_data, patient_idx)
             
             results[patient_id] = {
                 'theta_sequence': theta_samples.cpu().numpy(),
