@@ -13,6 +13,9 @@ import sys
 import os
 import argparse
 
+# Calculate the root directory once at module level
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 def run(cmd, cwd=None):
     """Run a subprocess command and raise on error."""
@@ -22,12 +25,11 @@ def run(cmd, cwd=None):
     # If running from a subdirectory, add the parent directory to PYTHONPATH
     # so that modules in the root directory can be imported
     if cwd is not None:
-        root_dir = os.path.dirname(os.path.abspath(__file__))
         current_pythonpath = env.get('PYTHONPATH', '')
         if current_pythonpath:
-            env['PYTHONPATH'] = f"{root_dir}{os.pathsep}{current_pythonpath}"
+            env['PYTHONPATH'] = f"{ROOT_DIR}{os.pathsep}{current_pythonpath}"
         else:
-            env['PYTHONPATH'] = root_dir
+            env['PYTHONPATH'] = ROOT_DIR
     
     subprocess.run(
         cmd,
