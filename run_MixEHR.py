@@ -17,9 +17,22 @@ import argparse
 def run(cmd, cwd=None):
     """Run a subprocess command and raise on error."""
     print(f"Running: {' '.join(cmd)}")
+    env = os.environ.copy()
+    
+    # If running from a subdirectory, add the parent directory to PYTHONPATH
+    # so that modules in the root directory can be imported
+    if cwd is not None:
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        current_pythonpath = env.get('PYTHONPATH', '')
+        if current_pythonpath:
+            env['PYTHONPATH'] = f"{root_dir}{os.pathsep}{current_pythonpath}"
+        else:
+            env['PYTHONPATH'] = root_dir
+    
     subprocess.run(
         cmd,
         cwd=cwd,
+        env=env,
         check=True
     )
 
