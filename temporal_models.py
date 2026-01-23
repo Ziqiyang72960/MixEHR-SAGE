@@ -989,20 +989,24 @@ class TemporalMixEHRTrainer(nn.Module):
                 # KL divergence for LSTM
                 kl_loss = self.lstm_model.kl_divergence(mu, logsigma).mean()
                 
-                # Initialize exp_m for this patient (T x K)
+                # Initialize exp_m for this patient (T x K) - no grad needed
                 exp_m_patient = torch.zeros(T, self.K, dtype=torch.double, device=device)
                 
                 # SCVB0-style updates for each time step
-                reconstruction_loss = 0.0
+                # Initialize as tensor for proper dtype/device handling
+                reconstruction_loss = torch.tensor(0.0, dtype=torch.double, device=device)
                 rho = 1 / (epoch * num_patients + p_idx + 1) ** 0.9  # Learning rate
                 
                 for t, bucket in enumerate(patient.buckets):
                     bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
                     
                     # Use LSTM alpha as dynamic prior
+                    # dynamic_eta keeps grad for reconstruction loss
+                    # dynamic_eta_ng (no grad) for SCVB0 count updates
                     dynamic_eta = alpha_t[0, t, :]
+                    dynamic_eta_ng = dynamic_eta.detach()
                     
-                    # Temporary accumulators for this time step
+                    # Temporary accumulators for this time step (no grad needed)
                     temp_exp_n = [torch.zeros_like(self.exp_n[m]) for m in range(self.modality_num)]
                     temp_exp_s = torch.zeros_like(self.exp_s)
                     
@@ -1023,51 +1027,62 @@ class TemporalMixEHRTrainer(nn.Module):
                         freqs = torch.tensor([bow_m[w] for w in word_ids], 
                                             dtype=torch.double, device=device)
                         
-                        # Compute gamma with dynamic prior (uses already filtered bow)
-                        filtered_bow_m = {w: bow_m[w] for w in word_ids}
-                        gamma, gamma_ss, gamma_rr = self._compute_gamma(
-                            filtered_bow_m, exp_m_patient[t] + dynamic_eta, m
-                        )
+                        # SCVB0 gamma/count updates under no_grad (use detached eta)
+                        with torch.no_grad():
+                            # Compute gamma with dynamic prior (uses detached eta)
+                            filtered_bow_m = {w: bow_m[w] for w in word_ids}
+                            gamma, gamma_ss, gamma_rr = self._compute_gamma(
+                                filtered_bow_m, exp_m_patient[t] + dynamic_eta_ng, m
+                            )
+                            
+                            if gamma is not None:
+                                # Update exp_m for this time step
+                                exp_m_patient[t] += (gamma * freqs.unsqueeze(1)).sum(dim=0)
+                                
+                                # Accumulate exp_n updates
+                                for i, word_id in enumerate(word_ids):
+                                    if m == self.guided_modality:
+                                        temp_exp_s[word_id] += gamma_ss[i] * freqs[i]
+                                        temp_exp_n[m][word_id] += gamma_rr[i] * freqs[i]
+                                    else:
+                                        temp_exp_n[m][word_id] += gamma[i] * freqs[i]
                         
-                        if gamma is None:
-                            continue
-                        
-                        # Update exp_m for this time step
-                        exp_m_patient[t] += (gamma * freqs.unsqueeze(1)).sum(dim=0)
-                        
-                        # Accumulate exp_n updates
-                        for i, word_id in enumerate(word_ids):
-                            if m == self.guided_modality:
-                                temp_exp_s[word_id] += gamma_ss[i] * freqs[i]
-                                temp_exp_n[m][word_id] += gamma_rr[i] * freqs[i]
-                            else:
-                                temp_exp_n[m][word_id] += gamma[i] * freqs[i]
-                        
-                        # Compute reconstruction loss (log likelihood)
+                        # Compute reconstruction loss OUTSIDE no_grad
+                        # Detach global stats so they don't carry old graphs
                         word_ids_t = torch.tensor(word_ids, device=device)
-                        if m == self.guided_modality:
-                            phi_combined = self.pi.unsqueeze(0) * \
-                                          (self.mu + self.exp_s[word_ids_t]) / (self.mu_sum + self.exp_s_sum + mini_val) + \
-                                          (1 - self.pi).unsqueeze(0) * \
-                                          (self.beta + self.exp_n[m][word_ids_t]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
-                        else:
-                            phi_combined = (self.beta + self.exp_n[m][word_ids_t]) / \
-                                          (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
                         
-                        theta_t = (exp_m_patient[t] + dynamic_eta) / \
-                                 (exp_m_patient[t].sum() + dynamic_eta.sum() + mini_val)
+                        # Detach exp_n/exp_s to prevent gradient flow through them
+                        exp_n_words = self.exp_n[m].detach()[word_ids_t]
+                        exp_n_sum_m = self.exp_n_sum[m].detach()
+                        
+                        if m == self.guided_modality:
+                            exp_s_words = self.exp_s.detach()[word_ids_t]
+                            exp_s_sum = self.exp_s_sum.detach()
+                            phi_combined = self.pi.unsqueeze(0) * \
+                                          (self.mu + exp_s_words) / (self.mu_sum + exp_s_sum + mini_val) + \
+                                          (1 - self.pi).unsqueeze(0) * \
+                                          (self.beta + exp_n_words) / (self.beta_sum[m] + exp_n_sum_m + mini_val)
+                        else:
+                            phi_combined = (self.beta + exp_n_words) / \
+                                          (self.beta_sum[m] + exp_n_sum_m + mini_val)
+                        
+                        # exp_m_patient is detached (from no_grad), dynamic_eta keeps grad
+                        exp_m_t_detached = exp_m_patient[t].detach()
+                        theta_t = (exp_m_t_detached + dynamic_eta) / \
+                                 (exp_m_t_detached.sum() + dynamic_eta.sum() + mini_val)
                         
                         log_prob = torch.log(torch.matmul(phi_combined, theta_t) + mini_val)
-                        reconstruction_loss -= (freqs * log_prob).sum()
+                        reconstruction_loss = reconstruction_loss - (freqs * log_prob).sum()
                     
-                    # Stochastic update of exp_n and exp_s
-                    if stochastic:
-                        for m in range(self.modality_num):
-                            self.exp_n[m] = (1 - rho) * self.exp_n[m] + rho * temp_exp_n[m] * num_patients
-                            self.exp_n_sum[m] = torch.sum(self.exp_n[m], dim=0)
-                        
-                        self.exp_s = (1 - rho) * self.exp_s + rho * temp_exp_s * num_patients
-                        self.exp_s_sum = torch.sum(self.exp_s, dim=0)
+                    # Stochastic update of exp_n and exp_s under no_grad
+                    with torch.no_grad():
+                        if stochastic:
+                            for m in range(self.modality_num):
+                                self.exp_n[m].mul_(1 - rho).add_(rho * temp_exp_n[m] * num_patients)
+                                self.exp_n_sum[m] = torch.sum(self.exp_n[m], dim=0)
+                            
+                            self.exp_s.mul_(1 - rho).add_(rho * temp_exp_s * num_patients)
+                            self.exp_s_sum = torch.sum(self.exp_s, dim=0)
                 
                 # Total loss
                 total_loss = kl_loss + reconstruction_loss / (T * 1000)  # Scale reconstruction
