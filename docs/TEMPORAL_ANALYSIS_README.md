@@ -139,6 +139,158 @@ This trains:
 
 The training follows the SCVB0 algorithm where phi and theta updates are intertwined.
 
+### Interpreting Training Output
+
+After training completes, you'll see output like:
+```
+INFO:temporal_models:Saved temporal trainer model to ./results/temporal_scratch.pt
+INFO:__main__:Saved phi for icd to ./results/learned_phi_icd.pt
+INFO:__main__:Saved phi for med to ./results/learned_phi_med.pt
+INFO:__main__:Saved phi for opcs to ./results/learned_phi_opcs.pt
+
+==================================================
+TEMPORAL MODEL TRAINING FROM SCRATCH COMPLETE
+==================================================
+Final ELBO: -1247.7599
+Model saved to: ./results/temporal_scratch.pt
+Theta sequences saved to: ./results/temporal_scratch_theta_sequences.csv
+Learned phi saved to: ./results/learned_phi_*.pt
+```
+
+**What each file contains:**
+
+| File | Description | How to Use |
+|------|-------------|------------|
+| `temporal_scratch.pt` | Full trainer model including LSTM, exp_n, exp_s, pi | For continued training or LSTM inference |
+| `learned_phi_<modality>.pt` | Word-topic distributions for each modality | Interpret topics, explain patient phenotypes |
+| `temporal_scratch_theta_sequences.csv` | Per-patient per-time topic mixtures | Disease progression analysis, risk prediction |
+
+### Next Steps After Training
+
+**Step 1: Train a Markov Model for Disease Progression**
+
+Use the theta sequences to learn state transitions:
+
+```bash
+python run_temporal.py train_markov \
+    --theta ./results/temporal_scratch_theta_sequences.csv \
+    --output ./results/markov_model.pkl \
+    --discretization soft
+```
+
+**Step 2: Predict Future Disease Risk**
+
+```bash
+# For a specific patient's current state
+python run_temporal.py predict_risk \
+    --model ./results/markov_model.pkl \
+    --patient ./patient_theta.csv \
+    --horizon 3
+```
+
+**Step 3: Analyze Disease Trajectories**
+
+```python
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+
+# Load theta sequences
+theta_df = pd.read_csv('./results/temporal_scratch_theta_sequences.csv')
+
+# Pick a patient
+patient_id = theta_df['patient_id'].unique()[0]
+patient_data = theta_df[theta_df['patient_id'] == patient_id].sort_values('time_index')
+
+# Get theta columns (topic probabilities)
+theta_cols = [c for c in patient_data.columns if c.startswith('theta_')]
+
+# Plot disease trajectory over time
+plt.figure(figsize=(12, 6))
+for col in theta_cols[:10]:  # Top 10 topics
+    plt.plot(patient_data['time_index'], patient_data[col], label=col)
+plt.xlabel('Time')
+plt.ylabel('Topic Probability')
+plt.title(f'Disease Trajectory - {patient_id}')
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.savefig('./results/patient_trajectory.png')
+```
+
+**Step 4: Interpret Topics Using Phi**
+
+```python
+import torch
+import pickle
+
+# Load phi for ICD modality
+phi_icd = torch.load('./results/learned_phi_icd.pt')
+
+# Load vocabulary mapping (code -> index)
+with open('./mapping/icd_vocab_ids.pkl', 'rb') as f:
+    icd_vocab = pickle.load(f)
+    
+# Reverse mapping (index -> code)
+idx_to_code = {v: k for k, v in icd_vocab.items()}
+
+# Find top codes for each topic
+K = phi_icd.shape[1]  # Number of topics
+for topic_idx in range(min(5, K)):  # First 5 topics
+    topic_probs = phi_icd[:, topic_idx]
+    top_indices = torch.argsort(topic_probs, descending=True)[:10]
+    
+    print(f"\nTopic {topic_idx}:")
+    for idx in top_indices:
+        code = idx_to_code.get(idx.item(), f'unknown_{idx.item()}')
+        prob = topic_probs[idx].item()
+        print(f"  {code}: {prob:.4f}")
+```
+
+**Step 5: Use with Patient Explanation (infer_patient.py)**
+
+The learned phi can be used with the explain functionality:
+
+```bash
+python infer_patient.py \
+    --model ./results/ \
+    --phi-icd ./results/learned_phi_icd.pt \
+    --phi-med ./results/learned_phi_med.pt \
+    --phi-opcs ./results/learned_phi_opcs.pt \
+    --patient-id patient_001 \
+    --explain
+```
+
+### Understanding the Theta Sequences
+
+The `theta_sequences.csv` file has columns:
+
+```csv
+patient_id,time_index,bucket_type,theta_0,theta_1,theta_2,...,theta_K
+patient_001,2015,yearly,0.123,0.045,0.032,...
+patient_001,2016,yearly,0.156,0.038,0.028,...
+```
+
+- **patient_id**: Patient identifier
+- **time_index**: Time bucket (year for yearly bucketing)
+- **theta_k**: Probability of topic k at this time point
+
+**Interpreting theta values:**
+- Higher θ_k means more medical codes in topic k
+- Changes in θ over time show disease progression
+- Dominant topics reveal primary health conditions
+
+### Understanding the ELBO
+
+The Evidence Lower Bound (ELBO) measures model fit:
+- **More negative = worse fit** at the beginning
+- **ELBO should increase** (become less negative) during training
+- Final ELBO around -1000 to -2000 is typical for medical data
+
+If ELBO doesn't improve:
+1. Increase `--num-epochs`
+2. Adjust `--learning-rate`
+3. Check data quality
+
 ## Temporal Theta Computation
 
 ### Input Data Formats

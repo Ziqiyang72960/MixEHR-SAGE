@@ -496,6 +496,35 @@ def train_from_scratch(args):
     print(f"Theta sequences saved to: {theta_output}")
     print(f"Learned phi saved to: {phi_output_dir}/learned_phi_*.pt")
     
+    # Print next steps instructions
+    print("\n" + "-" * 50)
+    print("NEXT STEPS:")
+    print("-" * 50)
+    print("\n1. Train a Markov model for disease progression analysis:")
+    print(f"   python run_temporal.py train_markov \\")
+    print(f"       --theta {theta_output} \\")
+    print(f"       --output {phi_output_dir}/markov_model.pkl")
+    
+    print("\n2. Predict future disease risk:")
+    print(f"   python run_temporal.py predict_risk \\")
+    print(f"       --model {phi_output_dir}/markov_model.pkl \\")
+    print(f"       --patient <patient_theta.csv> \\")
+    print(f"       --horizon 3")
+    
+    print("\n3. Visualize disease trajectories (Python):")
+    print("   import pandas as pd")
+    print("   import matplotlib.pyplot as plt")
+    print(f"   theta_df = pd.read_csv('{theta_output}')")
+    print("   # Plot theta values over time for a patient")
+    
+    print("\n4. Interpret topics using learned phi (Python):")
+    print("   import torch")
+    print(f"   phi = torch.load('{phi_output_dir}/learned_phi_icd.pt')")
+    print("   # phi[word_id, topic_id] = P(word | topic)")
+    
+    print("\nSee docs/TEMPORAL_ANALYSIS_README.md for detailed instructions.")
+    print("-" * 50)
+    
     return trainer, theta_sequences
 
 
