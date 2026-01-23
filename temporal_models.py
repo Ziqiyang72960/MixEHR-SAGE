@@ -687,6 +687,602 @@ class TemporalMixEHR(nn.Module):
         logger.info(f"Loaded temporal model from {path}")
 
 
+class TemporalMixEHRTrainer(nn.Module):
+    """
+    Temporal MixEHR-SAGE trainer that trains from scratch.
+    
+    This class allows training the model without pre-trained phi by jointly
+    updating exp_m (document-topic) and exp_n (word-topic) distributions
+    along with the LSTM temporal component, similar to the original 
+    MixEHR_SAGE training procedure (SCVB0).
+    
+    Key features:
+    - Train from scratch without existing phi
+    - Intertwined updates of exp_m and exp_n during training
+    - LSTM for temporal dynamics of topic prior η
+    - Supports temporal bucketing (yearly, monthly, etc.)
+    """
+    
+    def __init__(self, vocab_sizes: List[int], num_topics: int,
+                 seeds_topic_matrix: torch.Tensor,
+                 modalities: List[str],
+                 guided_modality: int = 0,
+                 hidden_size: int = 200,
+                 num_lstm_layers: int = 3,
+                 dropout: float = 0.0,
+                 eta: float = 0.01,
+                 beta: float = 0.01,
+                 mu: float = 0.01,
+                 delta: float = 0.01):
+        """
+        Initialize Temporal MixEHR Trainer.
+        
+        Args:
+            vocab_sizes: List of vocabulary sizes for each modality
+            num_topics: Number of topics (K)
+            seeds_topic_matrix: Seed word-topic matrix (V x K)
+            modalities: List of modality names
+            guided_modality: Index of guided modality (default: 0 for ICD)
+            hidden_size: LSTM hidden size
+            num_lstm_layers: Number of LSTM layers
+            dropout: Dropout rate
+            eta: Dirichlet prior for document-topic distribution
+            beta: Dirichlet prior for word-topic distribution (regular)
+            mu: Dirichlet prior for word-topic distribution (seed)
+            delta: Prior variance for η temporal dynamics
+        """
+        super(TemporalMixEHRTrainer, self).__init__()
+        
+        self.V = vocab_sizes
+        self.K = num_topics
+        self.modality_num = len(modalities)
+        self.modalities = modalities
+        self.guided_modality = guided_modality
+        self.seeds_topic_matrix = seeds_topic_matrix.to(device)
+        
+        # Hyperparameters
+        self.eta_prior = eta  # Document-topic prior
+        self.beta = beta  # Regular word-topic prior
+        self.mu = mu  # Seed word-topic prior
+        self.delta = delta  # Temporal variance
+        
+        # Compute prior sums
+        self.beta_sum = [beta * V for V in self.V]
+        self.mu_sum = mu * self.V[guided_modality]
+        
+        # Initialize expected sufficient statistics
+        # exp_n[m]: word-topic counts for modality m (V_m x K)
+        # exp_s: seed word-topic counts (V_guided x K)
+        # exp_m: document-topic counts (will be T x K per patient)
+        self.exp_n = [torch.zeros(V, self.K, dtype=torch.double, device=device) 
+                      for V in self.V]
+        self.exp_s = torch.zeros(self.V[guided_modality], self.K, dtype=torch.double, device=device)
+        
+        # Sum statistics
+        self.exp_n_sum = [torch.zeros(self.K, dtype=torch.double, device=device) 
+                          for _ in self.V]
+        self.exp_s_sum = torch.zeros(self.K, dtype=torch.double, device=device)
+        
+        # Pi: mixing proportion for seed vs regular topic
+        self.pi = torch.ones(self.K, dtype=torch.double, device=device) * 0.5
+        
+        # LSTM for temporal dynamics
+        self.lstm_model = TemporalLSTMModel(
+            vocab_size=sum(self.V),
+            num_topics=self.K,
+            hidden_size=hidden_size,
+            num_layers=num_lstm_layers,
+            dropout=dropout,
+            delta=delta
+        ).to(device)
+        
+        # Optimizer for LSTM
+        self.lr = 0.0001
+        self.weight_decay = 1.2e-6
+        self.clip_grad = 5.0
+        self.optimizer = optim.Adam(
+            self.lstm_model.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
+        
+        # Training history
+        self.elbo_history = []
+        
+    def _initialize_from_data(self, temporal_corpus, vocab_mappings: Dict,
+                              modality_list: List[str]):
+        """
+        Initialize exp_n and exp_s from the data using uniform priors.
+        
+        Args:
+            temporal_corpus: TemporalCorpus with patient data
+            vocab_mappings: Vocabulary mappings
+            modality_list: List of modality names
+        """
+        logger.info("Initializing sufficient statistics from data...")
+        
+        # Count word occurrences per topic (uniform initialization)
+        for patient_id, patient in temporal_corpus.patients.items():
+            for bucket in patient.buckets:
+                bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
+                
+                for m, modality in enumerate(modality_list):
+                    if m >= self.modality_num:
+                        continue
+                    
+                    for word_id, freq in bow[m].items():
+                        if word_id >= self.V[m]:
+                            continue
+                        
+                        if m == self.guided_modality:
+                            # For guided modality, split between seed and regular
+                            is_seed = self.seeds_topic_matrix[word_id].sum() > 0
+                            if is_seed:
+                                # Initialize seed words to their seed topics
+                                self.exp_s[word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
+                                self.exp_n[m][word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
+                            else:
+                                # Initialize regular words uniformly
+                                self.exp_n[m][word_id] += freq / self.K
+                        else:
+                            # Unguided modality: use exp_m from guided to distribute
+                            self.exp_n[m][word_id] += freq / self.K
+        
+        # Update sums
+        for m in range(self.modality_num):
+            self.exp_n_sum[m] = torch.sum(self.exp_n[m], dim=0)
+        self.exp_s_sum = torch.sum(self.exp_s, dim=0)
+        
+        logger.info("Initialization complete")
+    
+    def _compute_gamma(self, bow_m: Dict[int, int], exp_m_t: torch.Tensor,
+                       modality: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute gamma (topic assignment probabilities) for a document at time t.
+        
+        This follows the SCVB0 algorithm from the original MixEHR_SAGE.
+        
+        Args:
+            bow_m: Bag-of-words for modality m {word_id: freq}
+            exp_m_t: Expected topic counts for this time step (K,)
+            modality: Modality index
+            
+        Returns:
+            gamma: Topic assignment probabilities (V x K sparse)
+            gamma_ss: Seed word, seed topic assignments
+            gamma_sr: Seed word, regular topic assignments
+        """
+        V_m = self.V[modality]
+        
+        # Convert BOW to tensor
+        word_ids = list(bow_m.keys())
+        if not word_ids:
+            return None, None, None
+        
+        word_ids_t = torch.tensor(word_ids, device=device)
+        
+        if modality == self.guided_modality:
+            # Guided modality: handle seed and regular words separately
+            gamma_ss = torch.zeros(len(word_ids), self.K, dtype=torch.double, device=device)
+            gamma_sr = torch.zeros(len(word_ids), self.K, dtype=torch.double, device=device)
+            gamma_rr = torch.zeros(len(word_ids), self.K, dtype=torch.double, device=device)
+            
+            for i, word_id in enumerate(word_ids):
+                is_seed = self.seeds_topic_matrix[word_id]
+                
+                # Seed word, seed topic
+                gamma_ss[i] = is_seed * (exp_m_t + self.eta_prior) * \
+                             (self.mu + self.exp_s[word_id]) / (self.mu_sum + self.exp_s_sum + mini_val) * self.pi
+                
+                # Seed word, regular topic
+                gamma_sr[i] = is_seed * (exp_m_t + self.eta_prior) * \
+                             (self.beta + self.exp_n[modality][word_id]) / \
+                             (self.beta_sum[modality] + self.exp_n_sum[modality] + mini_val) * (1 - self.pi)
+                
+                # Regular word, regular topic
+                gamma_rr[i] = (1 - is_seed) * (exp_m_t + self.eta_prior) * \
+                             (self.beta + self.exp_n[modality][word_id]) / \
+                             (self.beta_sum[modality] + self.exp_n_sum[modality] + mini_val)
+            
+            # Normalize
+            gamma_s_sum = gamma_ss.sum(dim=1, keepdim=True) + gamma_sr.sum(dim=1, keepdim=True)
+            gamma_r_sum = gamma_rr.sum(dim=1, keepdim=True)
+            
+            gamma_ss = gamma_ss / (gamma_s_sum + mini_val)
+            gamma_sr = gamma_sr / (gamma_s_sum + mini_val)
+            gamma_rr = gamma_rr / (gamma_r_sum + mini_val)
+            
+            # Combined gamma for exp_m update
+            gamma = self.pi.unsqueeze(0) * gamma_ss + (1 - self.pi).unsqueeze(0) * (gamma_sr + gamma_rr)
+            
+            return gamma, gamma_ss, gamma_sr + gamma_rr
+        else:
+            # Unguided modality: standard LDA
+            gamma = torch.zeros(len(word_ids), self.K, dtype=torch.double, device=device)
+            
+            for i, word_id in enumerate(word_ids):
+                gamma[i] = (exp_m_t + self.eta_prior) * \
+                          (self.beta + self.exp_n[modality][word_id]) / \
+                          (self.beta_sum[modality] + self.exp_n_sum[modality] + mini_val)
+            
+            # Normalize
+            gamma = gamma / (gamma.sum(dim=1, keepdim=True) + mini_val)
+            
+            return gamma, None, None
+    
+    def train_temporal(self, temporal_corpus, vocab_mappings: Dict,
+                       modality_list: List[str], num_epochs: int = 10,
+                       stochastic: bool = True) -> List[float]:
+        """
+        Train temporal MixEHR from scratch with intertwined exp_m and exp_n updates.
+        
+        This implements the full training procedure where phi (via exp_n) and 
+        theta (via exp_m) are updated together at each iteration, along with
+        the LSTM temporal component.
+        
+        Args:
+            temporal_corpus: TemporalCorpus with patient data
+            vocab_mappings: Vocabulary mappings
+            modality_list: List of modality names
+            num_epochs: Number of training epochs
+            stochastic: Use stochastic VI (default: True)
+            
+        Returns:
+            List of ELBO values per epoch
+        """
+        self.train()
+        
+        # Initialize from data if not already done
+        if self.exp_n_sum[0].sum() == 0:
+            self._initialize_from_data(temporal_corpus, vocab_mappings, modality_list)
+        
+        patient_ids = list(temporal_corpus.patients.keys())
+        num_patients = len(patient_ids)
+        total_V = sum(len(v) for v in vocab_mappings.values())
+        
+        elbo_history = []
+        
+        for epoch in range(num_epochs):
+            epoch_elbo = 0.0
+            np.random.shuffle(patient_ids)
+            
+            # Process each patient
+            for p_idx, patient_id in enumerate(patient_ids):
+                patient = temporal_corpus.patients[patient_id]
+                T = patient.num_time_steps
+                
+                # Build BOW sequence for LSTM
+                bow_seq = torch.zeros(1, T, total_V, device=device)
+                for t, bucket in enumerate(patient.buckets):
+                    bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
+                    offset = 0
+                    for m, modality in enumerate(modality_list):
+                        if modality in vocab_mappings:
+                            for word_id, freq in bow[m].items():
+                                bow_seq[0, t, offset + word_id] = freq
+                            offset += len(vocab_mappings[modality])
+                
+                # Get temporal alpha from LSTM
+                self.optimizer.zero_grad()
+                mu, logsigma = self.lstm_model(bow_seq)
+                eta = self.lstm_model.sample_eta(mu, logsigma)
+                alpha_t = self.lstm_model.get_alpha(eta)  # (1, T, K)
+                
+                # KL divergence for LSTM
+                kl_loss = self.lstm_model.kl_divergence(mu, logsigma).mean()
+                
+                # Initialize exp_m for this patient (T x K)
+                exp_m_patient = torch.zeros(T, self.K, dtype=torch.double, device=device)
+                
+                # SCVB0-style updates for each time step
+                reconstruction_loss = 0.0
+                rho = 1 / (epoch * num_patients + p_idx + 1) ** 0.9  # Learning rate
+                
+                for t, bucket in enumerate(patient.buckets):
+                    bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
+                    
+                    # Use LSTM alpha as dynamic prior
+                    dynamic_eta = alpha_t[0, t, :]
+                    
+                    # Temporary accumulators for this time step
+                    temp_exp_n = [torch.zeros_like(self.exp_n[m]) for m in range(self.modality_num)]
+                    temp_exp_s = torch.zeros_like(self.exp_s)
+                    
+                    for m, modality in enumerate(modality_list):
+                        if m >= self.modality_num:
+                            continue
+                        
+                        bow_m = bow[m]
+                        if not bow_m:
+                            continue
+                        
+                        word_ids = list(bow_m.keys())
+                        freqs = torch.tensor([bow_m[w] for w in word_ids], 
+                                            dtype=torch.double, device=device)
+                        
+                        # Compute gamma with dynamic prior
+                        gamma, gamma_ss, gamma_rr = self._compute_gamma(
+                            bow_m, exp_m_patient[t] + dynamic_eta, m
+                        )
+                        
+                        if gamma is None:
+                            continue
+                        
+                        # Update exp_m for this time step
+                        exp_m_patient[t] += (gamma * freqs.unsqueeze(1)).sum(dim=0)
+                        
+                        # Accumulate exp_n updates
+                        for i, word_id in enumerate(word_ids):
+                            if m == self.guided_modality:
+                                temp_exp_s[word_id] += gamma_ss[i] * freqs[i]
+                                temp_exp_n[m][word_id] += gamma_rr[i] * freqs[i]
+                            else:
+                                temp_exp_n[m][word_id] += gamma[i] * freqs[i]
+                        
+                        # Compute reconstruction loss (log likelihood)
+                        if m == self.guided_modality:
+                            phi_combined = self.pi.unsqueeze(0) * \
+                                          (self.mu + self.exp_s[word_ids]) / (self.mu_sum + self.exp_s_sum + mini_val) + \
+                                          (1 - self.pi).unsqueeze(0) * \
+                                          (self.beta + self.exp_n[m][word_ids]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                        else:
+                            phi_combined = (self.beta + self.exp_n[m][word_ids]) / \
+                                          (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                        
+                        theta_t = (exp_m_patient[t] + dynamic_eta) / \
+                                 (exp_m_patient[t].sum() + dynamic_eta.sum() + mini_val)
+                        
+                        log_prob = torch.log(torch.matmul(phi_combined, theta_t) + mini_val)
+                        reconstruction_loss -= (freqs * log_prob).sum()
+                    
+                    # Stochastic update of exp_n and exp_s
+                    if stochastic:
+                        for m in range(self.modality_num):
+                            self.exp_n[m] = (1 - rho) * self.exp_n[m] + rho * temp_exp_n[m] * num_patients
+                            self.exp_n_sum[m] = torch.sum(self.exp_n[m], dim=0)
+                        
+                        self.exp_s = (1 - rho) * self.exp_s + rho * temp_exp_s * num_patients
+                        self.exp_s_sum = torch.sum(self.exp_s, dim=0)
+                
+                # Total loss
+                total_loss = kl_loss + reconstruction_loss / (T * 1000)  # Scale reconstruction
+                
+                # Backward pass for LSTM
+                total_loss.backward()
+                
+                if self.clip_grad > 0:
+                    nn.utils.clip_grad_norm_(self.lstm_model.parameters(), self.clip_grad)
+                
+                self.optimizer.step()
+                
+                epoch_elbo -= total_loss.item()
+            
+            avg_elbo = epoch_elbo / num_patients
+            elbo_history.append(avg_elbo)
+            self.elbo_history.append(avg_elbo)
+            
+            logger.info(f"Epoch {epoch + 1}/{num_epochs}, ELBO: {avg_elbo:.4f}")
+            
+            # Save checkpoint periodically
+            if (epoch + 1) % 5 == 0:
+                self._update_pi()
+        
+        return elbo_history
+    
+    def _update_pi(self):
+        """Update pi based on learned exp_s and exp_n."""
+        # Pi is the proportion of seed topic vs regular topic for seed words
+        seed_total = self.exp_s_sum + mini_val
+        regular_total = self.exp_n_sum[self.guided_modality] + mini_val
+        self.pi = seed_total / (seed_total + regular_total)
+        self.pi = torch.clamp(self.pi, 0.1, 0.9)  # Keep pi bounded
+    
+    def get_phi(self, modality: int = 0) -> torch.Tensor:
+        """
+        Get learned word-topic distribution (phi) for a modality.
+        
+        Args:
+            modality: Modality index
+            
+        Returns:
+            phi: V x K tensor of word-topic probabilities
+        """
+        phi = (self.beta + self.exp_n[modality]) / \
+              (self.beta_sum[modality] + self.exp_n_sum[modality].unsqueeze(0) + mini_val)
+        return phi
+    
+    def get_phi_seed(self) -> torch.Tensor:
+        """Get learned seed word-topic distribution."""
+        phi_s = (self.mu + self.exp_s) / \
+                (self.mu_sum + self.exp_s_sum.unsqueeze(0) + mini_val)
+        return phi_s
+    
+    def get_combined_phi(self, modality: int = 0) -> torch.Tensor:
+        """
+        Get combined phi using π * φ^s + (1-π) * φ^r.
+        
+        Only applies to guided modality; returns regular phi for others.
+        """
+        if modality == self.guided_modality:
+            phi_s = self.get_phi_seed()
+            phi_r = self.get_phi(modality)
+            # Apply seed mask
+            is_seed = (self.seeds_topic_matrix.sum(dim=1, keepdim=True) > 0).float()
+            phi_combined = is_seed * (self.pi.unsqueeze(0) * phi_s + 
+                                      (1 - self.pi).unsqueeze(0) * phi_r) + \
+                          (1 - is_seed) * phi_r
+            return phi_combined
+        else:
+            return self.get_phi(modality)
+    
+    def infer_theta(self, bow: List[Dict[int, int]], num_iterations: int = 10) -> torch.Tensor:
+        """
+        Infer theta for new patient data using learned phi.
+        
+        Args:
+            bow: List of BOW dicts, one per modality
+            num_iterations: Number of inference iterations
+            
+        Returns:
+            theta: K-dimensional topic mixture
+        """
+        theta = torch.ones(self.K, dtype=torch.double, device=device) / self.K
+        
+        for _ in range(num_iterations):
+            exp_topic_counts = torch.zeros(self.K, dtype=torch.double, device=device)
+            
+            for m in range(min(len(bow), self.modality_num)):
+                bow_m = bow[m]
+                if not bow_m:
+                    continue
+                
+                word_ids = list(bow_m.keys())
+                freqs = torch.tensor([bow_m[w] for w in word_ids], 
+                                    dtype=torch.double, device=device)
+                
+                # Get phi for this modality
+                if m == self.guided_modality:
+                    phi = self.get_combined_phi(m)
+                else:
+                    phi = self.get_phi(m)
+                
+                phi_words = phi[word_ids]  # (num_words, K)
+                gamma = theta.unsqueeze(0) * phi_words
+                gamma = gamma / (gamma.sum(dim=1, keepdim=True) + mini_val)
+                
+                exp_topic_counts += (gamma * freqs.unsqueeze(1)).sum(dim=0)
+            
+            theta = (exp_topic_counts + self.eta_prior) / \
+                   (exp_topic_counts.sum() + self.K * self.eta_prior)
+        
+        return theta
+    
+    def infer_temporal_theta(self, temporal_corpus, vocab_mappings: Dict,
+                            modality_list: List[str], 
+                            num_iterations: int = 10) -> Dict[str, torch.Tensor]:
+        """
+        Infer temporal theta sequences using learned model.
+        
+        Args:
+            temporal_corpus: TemporalCorpus
+            vocab_mappings: Vocabulary mappings
+            modality_list: List of modality names
+            num_iterations: Inference iterations per time step
+            
+        Returns:
+            Dict mapping patient_id to theta sequence (T x K)
+        """
+        self.eval()
+        theta_sequences = {}
+        total_V = sum(len(v) for v in vocab_mappings.values())
+        
+        with torch.no_grad():
+            for patient_id, patient in temporal_corpus.patients.items():
+                T = patient.num_time_steps
+                
+                # Build BOW sequence for LSTM
+                bow_seq = torch.zeros(1, T, total_V, device=device)
+                for t, bucket in enumerate(patient.buckets):
+                    bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
+                    offset = 0
+                    for m, modality in enumerate(modality_list):
+                        if modality in vocab_mappings:
+                            for word_id, freq in bow[m].items():
+                                bow_seq[0, t, offset + word_id] = freq
+                            offset += len(vocab_mappings[modality])
+                
+                # Get temporal alpha from LSTM
+                mu, _ = self.lstm_model(bow_seq)
+                alpha = self.lstm_model.get_alpha(mu)  # (1, T, K)
+                
+                # Infer theta at each time step
+                theta_seq = torch.zeros(T, self.K, dtype=torch.double, device=device)
+                
+                for t, bucket in enumerate(patient.buckets):
+                    bow = patient.get_cumulative_bow(
+                        bucket.time_index, vocab_mappings, modality_list
+                    )
+                    
+                    # Use LSTM alpha as prior for this time step
+                    dynamic_eta = alpha[0, t, :]
+                    
+                    # Initialize theta with dynamic prior
+                    theta_t = dynamic_eta / (dynamic_eta.sum() + mini_val)
+                    
+                    for _ in range(num_iterations):
+                        exp_counts = torch.zeros(self.K, dtype=torch.double, device=device)
+                        
+                        for m, modality in enumerate(modality_list):
+                            if m >= self.modality_num:
+                                continue
+                            bow_m = bow[m]
+                            if not bow_m:
+                                continue
+                            
+                            word_ids = list(bow_m.keys())
+                            freqs = torch.tensor([bow_m[w] for w in word_ids],
+                                                dtype=torch.double, device=device)
+                            
+                            phi = self.get_combined_phi(m) if m == self.guided_modality else self.get_phi(m)
+                            phi_words = phi[word_ids]
+                            
+                            gamma = theta_t.unsqueeze(0) * phi_words
+                            gamma = gamma / (gamma.sum(dim=1, keepdim=True) + mini_val)
+                            
+                            exp_counts += (gamma * freqs.unsqueeze(1)).sum(dim=0)
+                        
+                        # Update with dynamic prior
+                        theta_t = (exp_counts + dynamic_eta) / \
+                                 (exp_counts.sum() + dynamic_eta.sum() + mini_val)
+                    
+                    theta_seq[t] = theta_t
+                
+                theta_sequences[patient_id] = theta_seq
+        
+        return theta_sequences
+    
+    def save(self, path: str):
+        """Save the complete model state."""
+        torch.save({
+            'lstm_state_dict': self.lstm_model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'exp_n': self.exp_n,
+            'exp_s': self.exp_s,
+            'exp_n_sum': self.exp_n_sum,
+            'exp_s_sum': self.exp_s_sum,
+            'pi': self.pi,
+            'V': self.V,
+            'K': self.K,
+            'modalities': self.modalities,
+            'elbo_history': self.elbo_history,
+        }, path)
+        logger.info(f"Saved temporal trainer model to {path}")
+    
+    @classmethod
+    def load(cls, path: str, seeds_topic_matrix: torch.Tensor) -> 'TemporalMixEHRTrainer':
+        """Load a saved model."""
+        checkpoint = torch.load(path, map_location=device)
+        
+        model = cls(
+            vocab_sizes=checkpoint['V'],
+            num_topics=checkpoint['K'],
+            seeds_topic_matrix=seeds_topic_matrix,
+            modalities=checkpoint['modalities']
+        )
+        
+        model.lstm_model.load_state_dict(checkpoint['lstm_state_dict'])
+        model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        model.exp_n = checkpoint['exp_n']
+        model.exp_s = checkpoint['exp_s']
+        model.exp_n_sum = checkpoint['exp_n_sum']
+        model.exp_s_sum = checkpoint['exp_s_sum']
+        model.pi = checkpoint['pi']
+        model.elbo_history = checkpoint.get('elbo_history', [])
+        
+        logger.info(f"Loaded temporal trainer model from {path}")
+        return model
+
+
 def analyze_disease_progression(theta_sequences: Dict[str, torch.Tensor],
                                topic_names: Optional[Dict[int, str]] = None,
                                target_topics: Optional[List[int]] = None) -> pd.DataFrame:

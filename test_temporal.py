@@ -18,7 +18,10 @@ import torch
 
 # Import from same directory (tests are expected to run from the repo root)
 from temporal_corpus import TemporalCorpus, TemporalBucket, TemporalPatient, generate_sample_temporal_data
-from temporal_models import MarkovTransitionModel, TemporalLSTMModel, analyze_disease_progression
+from temporal_models import (
+    MarkovTransitionModel, TemporalLSTMModel, TemporalMixEHRTrainer,
+    analyze_disease_progression
+)
 
 
 class TestTemporalBucket(unittest.TestCase):

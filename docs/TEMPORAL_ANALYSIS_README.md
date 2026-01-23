@@ -94,6 +94,16 @@ python run_temporal.py compute_theta \
     --output ./results/temporal/ \
     --bucket-type yearly
 
+# Limit to 5000 patients for testing (useful for large datasets)
+python run_temporal.py compute_theta \
+    --icd ./data/temporal_icd.csv \
+    --med ./data/temporal_med.csv \
+    --opcs ./data/temporal_opcs.csv \
+    --model-path ./results/ \
+    --output ./results/temporal/ \
+    --bucket-type yearly \
+    --max-patients 5000
+
 # Step 2: Train Markov progression model
 python run_temporal.py train_markov \
     --theta ./results/temporal/theta_sequences.csv \
@@ -105,6 +115,29 @@ python run_temporal.py predict_risk \
     --patient ./patient_theta.csv \
     --horizon 3
 ```
+
+### Training from Scratch (without pre-trained phi)
+
+If you don't have a pre-trained model and want to train phi and theta simultaneously (like the original MixEHR-SAGE training):
+
+```bash
+python run_temporal.py train_from_scratch \
+    --icd ./data/temporal_icd.csv \
+    --med ./data/temporal_med.csv \
+    --opcs ./data/temporal_opcs.csv \
+    --seed-matrix ./phecode_mapping/seed_topic_matrix.pt \
+    --output ./results/temporal_scratch.pt \
+    --bucket-type yearly \
+    --num-epochs 20 \
+    --max-patients 5000
+```
+
+This trains:
+- `exp_n` (word-topic distributions / phi) for each modality
+- `exp_m` (document-topic distributions / theta) for each patient-time
+- LSTM for temporal dynamics of topic prior η
+
+The training follows the SCVB0 algorithm where phi and theta updates are intertwined.
 
 ## Temporal Theta Computation
 

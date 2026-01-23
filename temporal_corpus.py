@@ -445,7 +445,9 @@ class TemporalCorpus:
     
     def compute_theta_sequences(self, model, num_iterations: int = 10, 
                                 use_cumulative: bool = True,
-                                method: str = 'variational') -> Dict[str, torch.Tensor]:
+                                method: str = 'variational',
+                                save_interval: int = 1000,
+                                output_path: Optional[str] = None) -> Dict[str, torch.Tensor]:
         """
         Compute per-patient per-time topic mixture sequences θ_t.
         
@@ -455,6 +457,8 @@ class TemporalCorpus:
             use_cumulative: If True, use cumulative records up to time t (prevents data leakage)
                            If False, use only records in time bucket t
             method: Inference method ('variational' or 'gibbs')
+            save_interval: Save intermediate results every N patients (default: 1000)
+            output_path: Optional path to save intermediate results
             
         Returns:
             Dict mapping patient_id to theta sequence tensor (T x K)
@@ -464,7 +468,13 @@ class TemporalCorpus:
         
         theta_sequences = {}
         
-        for patient_id, patient in self.patients.items():
+        total_patients = len(self.patients)
+        patient_ids = list(self.patients.keys())
+        
+        logger.info(f"Computing theta sequences for {total_patients} patients...")
+        
+        for idx, patient_id in enumerate(patient_ids):
+            patient = self.patients[patient_id]
             T = patient.num_time_steps
             K = model.K
             theta_seq = torch.zeros(T, K, dtype=torch.double, device=device)
@@ -497,8 +507,54 @@ class TemporalCorpus:
             
             patient.theta_sequence = theta_seq
             theta_sequences[patient_id] = theta_seq
+            
+            # Progress logging
+            if (idx + 1) % 100 == 0 or (idx + 1) == total_patients:
+                logger.info(f"Progress: {idx + 1}/{total_patients} patients ({100*(idx+1)/total_patients:.1f}%)")
+            
+            # Periodic saving
+            if output_path and (idx + 1) % save_interval == 0:
+                self._save_intermediate_results(output_path, theta_sequences, idx + 1)
         
+        logger.info(f"Completed theta computation for {total_patients} patients")
         return theta_sequences
+    
+    def _save_intermediate_results(self, output_path: str, theta_sequences: Dict, 
+                                   num_processed: int):
+        """Save intermediate theta results to avoid losing progress."""
+        import os
+        
+        # Create checkpoint filename
+        base, ext = os.path.splitext(output_path)
+        checkpoint_path = f"{base}_checkpoint_{num_processed}{ext}"
+        
+        try:
+            if output_path.endswith('.pkl'):
+                import pickle
+                data = {pid: seq.cpu().numpy() for pid, seq in theta_sequences.items()}
+                with open(checkpoint_path, 'wb') as f:
+                    pickle.dump(data, f)
+            else:
+                # Save as CSV
+                rows = []
+                for patient_id, theta_seq in theta_sequences.items():
+                    theta_np = theta_seq.cpu().numpy()
+                    patient = self.patients[patient_id]
+                    for t, bucket in enumerate(patient.buckets):
+                        row = {
+                            'patient_id': patient_id,
+                            'time_index': bucket.time_index,
+                            'bucket_type': bucket.bucket_type,
+                        }
+                        for k in range(theta_np.shape[1]):
+                            row[f'theta_{k}'] = theta_np[t, k]
+                        rows.append(row)
+                
+                pd.DataFrame(rows).to_csv(checkpoint_path, index=False)
+            
+            logger.info(f"Saved checkpoint to {checkpoint_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save checkpoint: {e}")
     
     def export_theta_sequences(self, output_path: str, format: str = 'csv'):
         """

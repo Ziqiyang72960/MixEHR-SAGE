@@ -52,7 +52,7 @@ from MixEHR_SAGE import MixEHR_SAGE
 from temporal_corpus import TemporalCorpus, generate_sample_temporal_data
 from temporal_models import (
     MarkovTransitionModel, TemporalLSTMModel, TemporalMixEHR,
-    analyze_disease_progression
+    TemporalMixEHRTrainer, analyze_disease_progression
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -147,19 +147,28 @@ def compute_theta_sequences(args):
     
     logger.info(f"Created temporal corpus: {temporal_corpus}")
     
-    # Compute theta sequences
+    # Limit patients if --max-patients specified (for testing)
+    if args.max_patients is not None and args.max_patients > 0:
+        patient_ids = list(temporal_corpus.patients.keys())[:args.max_patients]
+        limited_patients = {pid: temporal_corpus.patients[pid] for pid in patient_ids}
+        temporal_corpus.patients = limited_patients
+        logger.info(f"Limited to {len(limited_patients)} patients (--max-patients={args.max_patients})")
+    
+    # Create output directory first (for checkpoints)
+    os.makedirs(args.output, exist_ok=True)
+    theta_csv_path = os.path.join(args.output, 'theta_sequences.csv')
+    
+    # Compute theta sequences with progress tracking and checkpoints
     theta_sequences = temporal_corpus.compute_theta_sequences(
         model,
         num_iterations=args.num_iterations,
         use_cumulative=args.use_cumulative,
-        method=args.inference_method
+        method=args.inference_method,
+        save_interval=1000,
+        output_path=theta_csv_path
     )
     
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
-    
-    # Export theta sequences
-    theta_csv_path = os.path.join(args.output, 'theta_sequences.csv')
+    # Export final theta sequences
     temporal_corpus.export_theta_sequences(theta_csv_path, format='csv')
     
     # Also save as pickle for convenience
@@ -286,6 +295,13 @@ def train_lstm_model(args):
     
     logger.info(f"Created temporal corpus: {temporal_corpus}")
     
+    # Limit patients if --max-patients specified
+    if args.max_patients is not None and args.max_patients > 0:
+        patient_ids = list(temporal_corpus.patients.keys())[:args.max_patients]
+        limited_patients = {pid: temporal_corpus.patients[pid] for pid in patient_ids}
+        temporal_corpus.patients = limited_patients
+        logger.info(f"Limited to {len(limited_patients)} patients (--max-patients={args.max_patients})")
+    
     # Create LSTM model
     lstm_model = TemporalLSTMModel(
         vocab_size=V,
@@ -327,6 +343,138 @@ def train_lstm_model(args):
     print(f"Theta sequences saved to: {theta_output}")
     
     return temporal_mixehr, theta_sequences
+
+
+def train_from_scratch(args):
+    """
+    Train temporal model from scratch without pre-trained phi.
+    
+    This trains exp_m (document-topic) and exp_n (word-topic) simultaneously
+    along with the LSTM temporal component, similar to the original MixEHR_SAGE
+    training procedure (SCVB0).
+    """
+    logger.info("Training temporal model from scratch...")
+    
+    # Load seed topic matrix
+    try:
+        seeds_topic_matrix = torch.load(args.seed_matrix, map_location=device, weights_only=True)
+    except Exception:
+        seeds_topic_matrix = torch.load(args.seed_matrix, map_location=device, weights_only=False)
+    
+    # Load vocabulary mappings
+    vocab_mappings = load_vocab_mappings(args.mapping_path)
+    modality_list = list(vocab_mappings.keys())
+    vocab_sizes = [len(vocab_mappings[m]) for m in modality_list]
+    
+    logger.info(f"Modalities: {modality_list}")
+    logger.info(f"Vocabulary sizes: {vocab_sizes}")
+    
+    # Load temporal data
+    modality_files = {}
+    if hasattr(args, 'icd') and args.icd:
+        modality_files['icd'] = args.icd
+    if hasattr(args, 'med') and args.med:
+        modality_files['med'] = args.med
+    if hasattr(args, 'opcs') and args.opcs:
+        modality_files['opcs'] = args.opcs
+    
+    if modality_files:
+        logger.info(f"Loading temporal data from modality files: {modality_files}")
+        temporal_corpus = TemporalCorpus.from_modality_files(
+            modality_files,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col
+        )
+    elif args.data:
+        temporal_corpus = TemporalCorpus.from_file(
+            args.data,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col,
+            modality_col=args.modality_col
+        )
+    else:
+        raise ValueError("Must provide either --data or modality-specific files (--icd, --med, --opcs)")
+    
+    temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
+    logger.info(f"Created temporal corpus: {temporal_corpus}")
+    
+    # Limit patients if --max-patients specified
+    if args.max_patients is not None and args.max_patients > 0:
+        patient_ids = list(temporal_corpus.patients.keys())[:args.max_patients]
+        limited_patients = {pid: temporal_corpus.patients[pid] for pid in patient_ids}
+        temporal_corpus.patients = limited_patients
+        logger.info(f"Limited to {len(limited_patients)} patients (--max-patients={args.max_patients})")
+    
+    # Create trainer model
+    K = seeds_topic_matrix.shape[1]  # Number of topics from seed matrix
+    logger.info(f"Number of topics (K): {K}")
+    
+    trainer = TemporalMixEHRTrainer(
+        vocab_sizes=vocab_sizes,
+        num_topics=K,
+        seeds_topic_matrix=seeds_topic_matrix,
+        modalities=modality_list,
+        guided_modality=0,  # ICD is typically the guided modality
+        hidden_size=args.hidden_size,
+        num_lstm_layers=args.num_layers,
+        dropout=args.dropout
+    )
+    
+    # Train
+    elbo_history = trainer.train_temporal(
+        temporal_corpus, vocab_mappings, modality_list,
+        num_epochs=args.num_epochs,
+        stochastic=True
+    )
+    
+    # Save model
+    os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+    trainer.save(args.output)
+    
+    # Compute and export theta sequences
+    theta_sequences = trainer.infer_temporal_theta(
+        temporal_corpus, vocab_mappings, modality_list,
+        num_iterations=args.num_iterations
+    )
+    
+    # Export theta sequences
+    theta_output = args.output.replace('.pt', '_theta_sequences.csv')
+    rows = []
+    for patient_id, theta_seq in theta_sequences.items():
+        theta_np = theta_seq.cpu().numpy()
+        patient = temporal_corpus.patients[patient_id]
+        for t, bucket in enumerate(patient.buckets):
+            row = {
+                'patient_id': patient_id,
+                'time_index': bucket.time_index,
+                'bucket_type': bucket.bucket_type,
+            }
+            for k in range(theta_np.shape[1]):
+                row[f'theta_{k}'] = theta_np[t, k]
+            rows.append(row)
+    pd.DataFrame(rows).to_csv(theta_output, index=False)
+    
+    # Export learned phi
+    phi_output_dir = os.path.dirname(args.output) or '.'
+    for m, modality in enumerate(modality_list):
+        phi = trainer.get_combined_phi(m) if m == 0 else trainer.get_phi(m)
+        phi_path = os.path.join(phi_output_dir, f'learned_phi_{modality}.pt')
+        torch.save(phi, phi_path)
+        logger.info(f"Saved phi for {modality} to {phi_path}")
+    
+    print("\n" + "=" * 50)
+    print("TEMPORAL MODEL TRAINING FROM SCRATCH COMPLETE")
+    print("=" * 50)
+    print(f"Final ELBO: {elbo_history[-1]:.4f}")
+    print(f"Model saved to: {args.output}")
+    print(f"Theta sequences saved to: {theta_output}")
+    print(f"Learned phi saved to: {phi_output_dir}/learned_phi_*.pt")
+    
+    return trainer, theta_sequences
 
 
 def predict_disease_risk(args):
@@ -554,6 +702,8 @@ def main():
                               help='Column name for timestamp')
     common_parser.add_argument('--modality-col', default='modality',
                               help='Column name for modality type')
+    common_parser.add_argument('--max-patients', type=int, default=None,
+                              help='Maximum number of patients to process (for testing, default: all)')
     
     # compute_theta command
     parser_theta = subparsers.add_parser('compute_theta', parents=[common_parser],
@@ -637,6 +787,35 @@ def main():
     parser_lstm.add_argument('--num-iterations', type=int, default=10,
                             help='Number of inference iterations')
     
+    # train_from_scratch command - trains both phi and theta together
+    parser_scratch = subparsers.add_parser('train_from_scratch', parents=[common_parser],
+                                           help='Train temporal model from scratch (no pre-trained phi)')
+    parser_scratch.add_argument('--data', default=None,
+                               help='Path to temporal data file (single file with all modalities)')
+    parser_scratch.add_argument('--icd', default=None,
+                               help='Path to temporal ICD codes file (alternative to --data)')
+    parser_scratch.add_argument('--med', default=None,
+                               help='Path to temporal medication codes file (alternative to --data)')
+    parser_scratch.add_argument('--opcs', default=None,
+                               help='Path to temporal OPCS procedure codes file (alternative to --data)')
+    parser_scratch.add_argument('--seed-matrix', default='./phecode_mapping/seed_topic_matrix.pt',
+                               help='Path to seed topic matrix')
+    parser_scratch.add_argument('--output', default='./results/temporal_scratch.pt',
+                               help='Output path for model')
+    parser_scratch.add_argument('--bucket-type', default='yearly',
+                               choices=['yearly', 'monthly', 'quarterly', 'visit'],
+                               help='Time bucketing strategy')
+    parser_scratch.add_argument('--hidden-size', type=int, default=200,
+                               help='LSTM hidden size')
+    parser_scratch.add_argument('--num-layers', type=int, default=3,
+                               help='Number of LSTM layers')
+    parser_scratch.add_argument('--dropout', type=float, default=0.0,
+                               help='Dropout rate')
+    parser_scratch.add_argument('--num-epochs', type=int, default=20,
+                               help='Number of training epochs')
+    parser_scratch.add_argument('--num-iterations', type=int, default=10,
+                               help='Number of inference iterations')
+    
     # predict_risk command
     parser_risk = subparsers.add_parser('predict_risk',
                                         help='Predict disease risk')
@@ -664,6 +843,8 @@ def main():
         train_markov_model(args)
     elif args.command == 'train_lstm':
         train_lstm_model(args)
+    elif args.command == 'train_from_scratch':
+        train_from_scratch(args)
     elif args.command == 'predict_risk':
         predict_disease_risk(args)
     elif args.command == 'demo':
