@@ -245,16 +245,42 @@ class TemporalCorpus:
         return cls.from_dataframe(df, bucket_type=bucket_type, **kwargs)
     
     def _compute_bucket_info(self, timestamp) -> Dict:
-        """Compute bucket index and boundaries for a timestamp."""
+        """
+        Compute bucket index and boundaries for a timestamp.
+        
+        Args:
+            timestamp: For 'visit' bucket_type, must be numeric (int/float).
+                      For 'yearly', 'monthly', 'quarterly' bucket_types, 
+                      must be a datetime object or datetime-compatible.
+        
+        Returns:
+            Dict with 'index', 'start', 'end' keys
+            
+        Raises:
+            TypeError: If timestamp type is incompatible with bucket_type
+        """
         if self.bucket_type == 'visit':
-            # Visit-based: timestamp is already the index
+            # Visit-based: timestamp is already the index (numeric)
+            if not isinstance(timestamp, (int, float)):
+                try:
+                    timestamp = int(timestamp)
+                except (ValueError, TypeError):
+                    raise TypeError(
+                        f"For 'visit' bucket_type, timestamp must be numeric, got {type(timestamp)}"
+                    )
             return {
                 'index': int(timestamp),
                 'start': int(timestamp),
                 'end': int(timestamp)
             }
         
-        # Time-based bucketing
+        # Time-based bucketing - timestamp should be datetime
+        if not hasattr(timestamp, 'year'):
+            raise TypeError(
+                f"For '{self.bucket_type}' bucket_type, timestamp must be datetime-compatible, "
+                f"got {type(timestamp)}. Use bucket_type='visit' for numeric indices."
+            )
+        
         if self.bucket_type == 'yearly':
             year = timestamp.year
             return {

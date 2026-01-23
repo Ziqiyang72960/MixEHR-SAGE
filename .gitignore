@@ -17,3 +17,7 @@ env/
 # Temporary files
 *.tmp
 *.log
+
+# Generated demo/test outputs
+temporal_demo_results/
+*_demo_results/

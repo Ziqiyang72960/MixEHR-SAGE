@@ -2,20 +2,21 @@
 """
 Tests for Temporal MixEHR-SAGE functionality.
 
-Run with: python test_temporal.py
+Run with: 
+    python test_temporal.py
+    
+Or from parent directory:
+    python -m test_temporal
 """
 
 import unittest
 import os
-import sys
 import tempfile
 import numpy as np
 import pandas as pd
 import torch
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# Import from same directory (tests are expected to run from the repo root)
 from temporal_corpus import TemporalCorpus, TemporalBucket, TemporalPatient, generate_sample_temporal_data
 from temporal_models import MarkovTransitionModel, TemporalLSTMModel, analyze_disease_progression
 

@@ -409,12 +409,14 @@ def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, v
                 seeds_matrix = model.seeds_topic_matrix.cpu().numpy()
                 
                 # Compute combined phi for this topic
+                # Use boolean mask directly for better performance
                 pi_k = pi[topic_idx] if hasattr(pi, '__len__') else pi
-                phi_combined = np.where(
-                    seeds_matrix[:, topic_idx:topic_idx+1] > 0,
-                    pi_k * phi_seed_np[:, topic_idx] + (1 - pi_k) * phi_regular_np[:, topic_idx],
-                    phi_regular_np[:, topic_idx]
-                ).flatten()
+                is_seed_word = seeds_matrix[:, topic_idx] > 0
+                phi_combined = phi_regular_np[:, topic_idx].copy()
+                phi_combined[is_seed_word] = (
+                    pi_k * phi_seed_np[is_seed_word, topic_idx] + 
+                    (1 - pi_k) * phi_regular_np[is_seed_word, topic_idx]
+                )
             else:
                 # For non-guided modality, just use regular phi
                 phi_combined = phi_regular_np[:, topic_idx]

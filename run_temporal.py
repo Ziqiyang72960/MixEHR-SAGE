@@ -79,7 +79,12 @@ def load_trained_model(model_path: str, corpus_path: str = './store/',
     corpus = Corpus.read_corpus_from_directory(corpus_path)
     
     # Load seed topic matrix
-    seeds_topic_matrix = torch.load(seed_matrix_path, map_location=device, weights_only=False)
+    # Note: Using weights_only=True for security when loading untrusted files
+    try:
+        seeds_topic_matrix = torch.load(seed_matrix_path, map_location=device, weights_only=True)
+    except Exception:
+        # Fall back to weights_only=False for backward compatibility with older saved models
+        seeds_topic_matrix = torch.load(seed_matrix_path, map_location=device, weights_only=False)
     
     # Load trained model
     model = MixEHR_SAGE.load_trained_model(

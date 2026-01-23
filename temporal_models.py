@@ -429,22 +429,28 @@ class TemporalLSTMModel(nn.Module):
     
     def kl_divergence(self, mu: torch.Tensor, logsigma: torch.Tensor) -> torch.Tensor:
         """
-        Compute KL divergence from prior.
+        Compute KL divergence between variational posterior q and prior p.
         
-        KL(q(η_t | η_{t-1}, h_t) || p(η_t | η_{t-1}))
+        Mathematical formulation:
+        - q(η_t | η_{t-1}, h_t) = N(μ_t, σ_t²) [variational posterior]
+        - p(η_t | η_{t-1}) = N(η_{t-1}, δ²I) [prior with variance δ²]
         
-        Assumes Gaussian prior p(η_t | η_{t-1}) = N(η_{t-1}, δ²I)
+        For Gaussian distributions, KL divergence is:
+        KL(q || p) = 0.5 * [tr(Σ_q/Σ_p) + (μ_p - μ_q)ᵀ Σ_p⁻¹ (μ_p - μ_q) - K + ln(|Σ_p|/|Σ_q|)]
+        
+        With diagonal covariances, this simplifies to:
+        KL = 0.5 * [Σ σ_q²/δ² + Σ (η_{t-1} - μ)²/δ² - K + K·ln(δ²) - Σ ln(σ_q²)]
         
         Args:
-            mu: (batch, T, K) variational mean
-            logsigma: (batch, T, K) variational log std
+            mu: (batch, T, K) variational mean μ at each timestep
+            logsigma: (batch, T, K) log of variational std σ at each timestep
             
         Returns:
-            kl: (batch,) KL divergence for each sequence
+            kl: (batch,) total KL divergence summed over all timesteps for each sequence
         """
         batch_size, T, K = mu.shape
         
-        var = torch.exp(2 * logsigma)
+        var = torch.exp(2 * logsigma)  # σ² = exp(2 * log(σ))
         
         # For t=0, prior is N(0, δ²I)
         # For t>0, prior is N(η_{t-1}, δ²I)
@@ -453,9 +459,8 @@ class TemporalLSTMModel(nn.Module):
         eta_prev = torch.zeros(batch_size, K, device=mu.device)
         
         for t in range(T):
-            # KL(N(mu, var) || N(eta_prev, delta²))
-            # = 0.5 * [tr(var/delta²) + (eta_prev - mu)²/delta² - K + K*log(delta²) - log|var|]
-            # = 0.5 * [sum(var)/delta² + sum((eta_prev - mu)²)/delta² - K + K*log(delta²) - sum(log(var))]
+            # KL(N(μ, σ²) || N(η_prev, δ²))
+            # = 0.5 * [Σ(σ²/δ²) + Σ((η_prev - μ)²/δ²) - K + K·ln(δ²) - Σ ln(σ²)]
             
             kl_t = 0.5 * (
                 torch.sum(var[:, t, :], dim=1) / (self.delta ** 2) +
