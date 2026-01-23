@@ -956,7 +956,7 @@ class TemporalMixEHRTrainer(nn.Module):
         
         patient_ids = list(temporal_corpus.patients.keys())
         num_patients = len(patient_ids)
-        total_V = sum(len(v) for v in vocab_mappings.values())
+        total_V = sum(self.V)  # Use the vocab sizes from model, not vocab_mappings
         
         elbo_history = []
         
@@ -975,10 +975,10 @@ class TemporalMixEHRTrainer(nn.Module):
                     bow = bucket.get_bow_by_modality(vocab_mappings, modality_list)
                     offset = 0
                     for m, modality in enumerate(modality_list):
-                        if modality in vocab_mappings:
-                            for word_id, freq in bow[m].items():
+                        for word_id, freq in bow[m].items():
+                            if word_id < self.V[m]:
                                 bow_seq[0, t, offset + word_id] = freq
-                            offset += len(vocab_mappings[modality])
+                        offset += self.V[m]
                 
                 # Get temporal alpha from LSTM
                 self.optimizer.zero_grad()
