@@ -361,15 +361,7 @@ def train_from_scratch(args):
     except Exception:
         seeds_topic_matrix = torch.load(args.seed_matrix, map_location=device, weights_only=False)
     
-    # Load vocabulary mappings
-    vocab_mappings = load_vocab_mappings(args.mapping_path)
-    modality_list = list(vocab_mappings.keys())
-    vocab_sizes = [len(vocab_mappings[m]) for m in modality_list]
-    
-    logger.info(f"Modalities: {modality_list}")
-    logger.info(f"Vocabulary sizes: {vocab_sizes}")
-    
-    # Load temporal data
+    # Determine which modalities are being used based on provided files
     modality_files = {}
     if hasattr(args, 'icd') and args.icd:
         modality_files['icd'] = args.icd
@@ -378,6 +370,30 @@ def train_from_scratch(args):
     if hasattr(args, 'opcs') and args.opcs:
         modality_files['opcs'] = args.opcs
     
+    if not modality_files and not args.data:
+        raise ValueError("Must provide either --data or modality-specific files (--icd, --med, --opcs)")
+    
+    # Load vocabulary mappings
+    vocab_mappings = load_vocab_mappings(args.mapping_path)
+    
+    # Only use modalities that have data files provided
+    if modality_files:
+        # Filter to only modalities with provided data files
+        modality_list = [m for m in modality_files.keys() if m in vocab_mappings]
+        if not modality_list:
+            raise ValueError(f"No matching modalities found. Provided: {list(modality_files.keys())}, "
+                           f"Available: {list(vocab_mappings.keys())}")
+        # Filter vocab_mappings to only include used modalities
+        vocab_mappings = {m: vocab_mappings[m] for m in modality_list}
+    else:
+        modality_list = list(vocab_mappings.keys())
+    
+    vocab_sizes = [len(vocab_mappings[m]) for m in modality_list]
+    
+    logger.info(f"Modalities: {modality_list}")
+    logger.info(f"Vocabulary sizes: {vocab_sizes}")
+    
+    # Load temporal data
     if modality_files:
         logger.info(f"Loading temporal data from modality files: {modality_files}")
         temporal_corpus = TemporalCorpus.from_modality_files(
@@ -396,8 +412,6 @@ def train_from_scratch(args):
             time_col=args.time_col,
             modality_col=args.modality_col
         )
-    else:
-        raise ValueError("Must provide either --data or modality-specific files (--icd, --med, --opcs)")
     
     temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
     logger.info(f"Created temporal corpus: {temporal_corpus}")
@@ -413,12 +427,20 @@ def train_from_scratch(args):
     K = seeds_topic_matrix.shape[1]  # Number of topics from seed matrix
     logger.info(f"Number of topics (K): {K}")
     
+    # Find the guided modality index (ICD should be guided)
+    guided_modality_idx = 0
+    for i, m in enumerate(modality_list):
+        if m == 'icd':
+            guided_modality_idx = i
+            break
+    logger.info(f"Guided modality: {modality_list[guided_modality_idx]} (index {guided_modality_idx})")
+    
     trainer = TemporalMixEHRTrainer(
         vocab_sizes=vocab_sizes,
         num_topics=K,
         seeds_topic_matrix=seeds_topic_matrix,
         modalities=modality_list,
-        guided_modality=0,  # ICD is typically the guided modality
+        guided_modality=guided_modality_idx,
         hidden_size=args.hidden_size,
         num_lstm_layers=args.num_layers,
         dropout=args.dropout

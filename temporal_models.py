@@ -801,6 +801,9 @@ class TemporalMixEHRTrainer(nn.Module):
         """
         logger.info("Initializing sufficient statistics from data...")
         
+        # Get the size of seed topic matrix for bounds checking
+        seed_matrix_size = self.seeds_topic_matrix.shape[0]
+        
         # Count word occurrences per topic (uniform initialization)
         for patient_id, patient in temporal_corpus.patients.items():
             for bucket in patient.buckets:
@@ -816,13 +819,18 @@ class TemporalMixEHRTrainer(nn.Module):
                         
                         if m == self.guided_modality:
                             # For guided modality, split between seed and regular
-                            is_seed = self.seeds_topic_matrix[word_id].sum() > 0
-                            if is_seed:
-                                # Initialize seed words to their seed topics
-                                self.exp_s[word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
-                                self.exp_n[m][word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
+                            # Check bounds for seed matrix
+                            if word_id < seed_matrix_size:
+                                is_seed = self.seeds_topic_matrix[word_id].sum() > 0
+                                if is_seed:
+                                    # Initialize seed words to their seed topics
+                                    self.exp_s[word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
+                                    self.exp_n[m][word_id] += self.seeds_topic_matrix[word_id] * freq * 0.5
+                                else:
+                                    # Initialize regular words uniformly
+                                    self.exp_n[m][word_id] += freq / self.K
                             else:
-                                # Initialize regular words uniformly
+                                # Word outside seed matrix range - treat as regular
                                 self.exp_n[m][word_id] += freq / self.K
                         else:
                             # Unguided modality: use exp_m from guided to distribute
@@ -859,7 +867,13 @@ class TemporalMixEHRTrainer(nn.Module):
         if not word_ids:
             return None, None, None
         
+        # Filter out word_ids that are out of bounds
+        word_ids = [w for w in word_ids if w < V_m]
+        if not word_ids:
+            return None, None, None
+        
         word_ids_t = torch.tensor(word_ids, device=device)
+        seed_matrix_size = self.seeds_topic_matrix.shape[0]
         
         if modality == self.guided_modality:
             # Guided modality: handle seed and regular words separately
@@ -868,7 +882,11 @@ class TemporalMixEHRTrainer(nn.Module):
             gamma_rr = torch.zeros(len(word_ids), self.K, dtype=torch.double, device=device)
             
             for i, word_id in enumerate(word_ids):
-                is_seed = self.seeds_topic_matrix[word_id]
+                # Check bounds for seed matrix
+                if word_id < seed_matrix_size:
+                    is_seed = self.seeds_topic_matrix[word_id]
+                else:
+                    is_seed = torch.zeros(self.K, dtype=torch.double, device=device)
                 
                 # Seed word, seed topic
                 gamma_ss[i] = is_seed * (exp_m_t + self.eta_prior) * \
@@ -996,13 +1014,19 @@ class TemporalMixEHRTrainer(nn.Module):
                         if not bow_m:
                             continue
                         
-                        word_ids = list(bow_m.keys())
+                        # Filter word_ids to valid range
+                        V_m = self.V[m]
+                        word_ids = [w for w in bow_m.keys() if w < V_m]
+                        if not word_ids:
+                            continue
+                        
                         freqs = torch.tensor([bow_m[w] for w in word_ids], 
                                             dtype=torch.double, device=device)
                         
-                        # Compute gamma with dynamic prior
+                        # Compute gamma with dynamic prior (uses already filtered bow)
+                        filtered_bow_m = {w: bow_m[w] for w in word_ids}
                         gamma, gamma_ss, gamma_rr = self._compute_gamma(
-                            bow_m, exp_m_patient[t] + dynamic_eta, m
+                            filtered_bow_m, exp_m_patient[t] + dynamic_eta, m
                         )
                         
                         if gamma is None:
@@ -1020,13 +1044,14 @@ class TemporalMixEHRTrainer(nn.Module):
                                 temp_exp_n[m][word_id] += gamma[i] * freqs[i]
                         
                         # Compute reconstruction loss (log likelihood)
+                        word_ids_t = torch.tensor(word_ids, device=device)
                         if m == self.guided_modality:
                             phi_combined = self.pi.unsqueeze(0) * \
-                                          (self.mu + self.exp_s[word_ids]) / (self.mu_sum + self.exp_s_sum + mini_val) + \
+                                          (self.mu + self.exp_s[word_ids_t]) / (self.mu_sum + self.exp_s_sum + mini_val) + \
                                           (1 - self.pi).unsqueeze(0) * \
-                                          (self.beta + self.exp_n[m][word_ids]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
+                                          (self.beta + self.exp_n[m][word_ids_t]) / (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
                         else:
-                            phi_combined = (self.beta + self.exp_n[m][word_ids]) / \
+                            phi_combined = (self.beta + self.exp_n[m][word_ids_t]) / \
                                           (self.beta_sum[m] + self.exp_n_sum[m] + mini_val)
                         
                         theta_t = (exp_m_patient[t] + dynamic_eta) / \
