@@ -380,7 +380,7 @@ class MarkovTransitionModel:
     
     def diagnose(self) -> Dict[str, any]:
         """
-        Run diagnostic checks on the fitted model.
+        Run comprehensive diagnostic checks on the fitted model.
         
         Returns:
             Dict with diagnostic results and recommendations
@@ -429,23 +429,297 @@ class MarkovTransitionModel:
         results['num_transitions'] = self.num_transitions
         results['num_patients'] = self.num_patients
         
-        # 6. Recommendations
+        # 6. DIAGONAL DOMINANCE / STICKINESS ANALYSIS
+        diagonal = np.diag(self.transition_matrix)
+        results['diagonal_mean'] = float(np.mean(diagonal))
+        results['diagonal_median'] = float(np.median(diagonal))
+        results['diagonal_max'] = float(np.max(diagonal))
+        results['diagonal_min'] = float(np.min(diagonal))
+        results['diagonal_std'] = float(np.std(diagonal))
+        
+        # States with P(i->i) > 0.9 (highly sticky)
+        sticky_states = np.sum(diagonal > 0.9)
+        results['num_sticky_states_90'] = int(sticky_states)
+        results['pct_sticky_states_90'] = float(sticky_states / self.num_states)
+        
+        # States with P(i->i) > 0.5 (moderately sticky)
+        results['num_sticky_states_50'] = int(np.sum(diagonal > 0.5))
+        results['pct_sticky_states_50'] = float(np.sum(diagonal > 0.5) / self.num_states)
+        
+        # 7. Row entropy (effective number of successors)
+        row_entropies = -np.sum(self.transition_matrix * np.log(self.transition_matrix + mini_val), axis=1)
+        results['mean_row_entropy'] = float(np.mean(row_entropies))
+        results['min_row_entropy'] = float(np.min(row_entropies))
+        results['max_row_entropy'] = float(np.max(row_entropies))
+        
+        # Effective number of successors (exp of entropy)
+        effective_successors = np.exp(row_entropies)
+        results['mean_effective_successors'] = float(np.mean(effective_successors))
+        results['min_effective_successors'] = float(np.min(effective_successors))
+        
+        # 8. Top-5 successor mass per row
+        top5_mass = []
+        for i in range(self.num_states):
+            row_sorted = np.sort(self.transition_matrix[i])[::-1]
+            top5_mass.append(np.sum(row_sorted[:5]))
+        results['mean_top5_successor_mass'] = float(np.mean(top5_mass))
+        results['max_top5_successor_mass'] = float(np.max(top5_mass))
+        
+        # 9. Raw transition count statistics
+        if self.raw_transition_counts is not None:
+            raw_diagonal = np.diag(self.raw_transition_counts)
+            raw_row_sums = np.sum(self.raw_transition_counts, axis=1)
+            # Avoid division by zero warning
+            with np.errstate(divide='ignore', invalid='ignore'):
+                raw_diagonal_ratio = np.where(raw_row_sums > 0, raw_diagonal / raw_row_sums, 0)
+            results['raw_diagonal_ratio_mean'] = float(np.mean(raw_diagonal_ratio[raw_row_sums > 0]) if np.any(raw_row_sums > 0) else 0)
+            results['raw_max_count'] = float(np.max(self.raw_transition_counts))
+            results['raw_total_count'] = float(np.sum(self.raw_transition_counts))
+        
+        # 10. Recommendations
         recommendations = []
         
         if results['mean_row_variance'] < 1e-5:
-            recommendations.append("Very low row variance - transition matrix is near-uniform")
+            recommendations.append("❌ Very low row variance - transition matrix is near-uniform")
             recommendations.append("  -> Try: smoothing=1e-4 or lower")
             recommendations.append("  -> Try: discretization='dominant' instead of 'soft'")
         
         if results.get('mixing_time_approx', 0) < 2:
-            recommendations.append(f"Fast mixing (time ~{results.get('mixing_time_approx', 0):.1f}) - horizon>1 may give near-stationary")
+            recommendations.append(f"⚠️ Fast mixing (time ~{results.get('mixing_time_approx', 0):.1f}) - horizon>1 may give near-stationary")
             recommendations.append("  -> Use horizon=1 for meaningful short-term predictions")
         
         if results['raw_counts_sparsity'] < 0.01:
-            recommendations.append(f"Very sparse transitions ({results['raw_counts_sparsity']:.4f}) - many states never visited")
+            recommendations.append(f"⚠️ Very sparse transitions ({results['raw_counts_sparsity']:.4f}) - many states never visited")
             recommendations.append("  -> Consider clustering topics or using top_k discretization")
         
+        # Diagonal dominance warnings
+        if results['diagonal_mean'] > 0.8:
+            recommendations.append(f"❌ Highly diagonal-dominant (mean P(i→i)={results['diagonal_mean']:.3f})")
+            recommendations.append("  -> This causes over-confident, sticky predictions")
+            recommendations.append("  -> Try: discretization='soft' or 'top_k' to spread transitions")
+            recommendations.append("  -> Try: predict_next_state_soft() to preserve theta uncertainty")
+            recommendations.append("  -> Try: temperature scaling with predict_risk(..., temperature=2.0)")
+        elif results['diagonal_mean'] > 0.5:
+            recommendations.append(f"⚠️ Moderately diagonal-dominant (mean P(i→i)={results['diagonal_mean']:.3f})")
+            recommendations.append("  -> Consider using soft predictions or temperature scaling")
+        
+        if results['pct_sticky_states_90'] > 0.1:
+            recommendations.append(f"⚠️ {results['pct_sticky_states_90']*100:.1f}% of states are 'absorbing-ish' (P(i→i) > 0.9)")
+            recommendations.append("  -> Consider clustering similar topics to reduce state space")
+        
+        if results['mean_effective_successors'] < 3:
+            recommendations.append(f"⚠️ Low effective successors ({results['mean_effective_successors']:.1f}) - predictions lack diversity")
+            recommendations.append("  -> Try: soft/top_k discretization during training")
+        
         results['recommendations'] = recommendations
+        
+        return results
+    
+    def predict_next_state_soft(self, current_theta: Union[np.ndarray, torch.Tensor],
+                                 return_distribution: bool = True) -> Union[int, np.ndarray]:
+        """
+        Predict next state using SOFT weighting from current_theta distribution.
+        
+        Unlike predict_next_state() which uses argmax(theta) for dominant discretization,
+        this method ALWAYS uses the full theta distribution to weight transition rows,
+        preserving uncertainty in the prediction.
+        
+        This is recommended when:
+        - Predictions are over-confident (diagonal-dominant matrix)
+        - You want to preserve uncertainty from the input theta
+        
+        Args:
+            current_theta: Current topic mixture (K,)
+            return_distribution: If True, return full distribution; else return most likely state
+            
+        Returns:
+            Next state distribution (K,) or most likely state (int)
+        """
+        if self.transition_matrix is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+        
+        if torch.is_tensor(current_theta):
+            current_theta = current_theta.cpu().numpy()
+        
+        # Always use weighted combination of all transition rows
+        # This preserves uncertainty from the input theta
+        next_dist = current_theta @ self.transition_matrix
+        
+        if return_distribution:
+            return next_dist
+        return next_dist.argmax()
+    
+    def predict_disease_risk_calibrated(self, current_theta: Union[np.ndarray, torch.Tensor],
+                                        horizon: int = 1,
+                                        temperature: float = 1.0,
+                                        use_soft: bool = True,
+                                        cumulative: bool = False,
+                                        target_topics: Optional[List[int]] = None) -> Dict[str, float]:
+        """
+        Predict disease risk with calibration options.
+        
+        This method provides better-calibrated predictions when the transition matrix
+        is diagonal-dominant (over-confident predictions).
+        
+        Args:
+            current_theta: Current topic mixture (K,)
+            horizon: Number of time steps to predict ahead
+            temperature: Temperature for softmax scaling (>1 = more uncertain, <1 = more confident)
+                        Default 1.0 = no scaling. Try 2.0-5.0 if predictions are over-confident.
+            use_soft: If True, use soft weighting from theta (preserves uncertainty)
+                     If False, use standard prediction method
+            cumulative: If True, return max probability over 1..horizon steps
+            target_topics: List of topic indices to report (default: top 10)
+            
+        Returns:
+            Dict with calibrated risk estimates
+        """
+        if self.transition_matrix is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+        
+        if torch.is_tensor(current_theta):
+            current_theta = current_theta.cpu().numpy()
+        
+        # Apply temperature scaling to transition matrix
+        if temperature != 1.0:
+            # Scale log-probabilities by temperature
+            log_trans = np.log(self.transition_matrix + mini_val)
+            scaled_log_trans = log_trans / temperature
+            # Renormalize rows
+            trans_scaled = np.exp(scaled_log_trans)
+            trans_scaled = trans_scaled / trans_scaled.sum(axis=1, keepdims=True)
+        else:
+            trans_scaled = self.transition_matrix
+        
+        if cumulative:
+            # Cumulative risk over 1..horizon
+            cumulative_risk = np.zeros(self.num_states)
+            for h in range(1, horizon + 1):
+                trans_h = np.linalg.matrix_power(trans_scaled, h)
+                if use_soft:
+                    step_dist = current_theta @ trans_h
+                else:
+                    current_state = current_theta.argmax()
+                    step_dist = trans_h[current_state]
+                cumulative_risk = np.maximum(cumulative_risk, step_dist)
+            future_dist = cumulative_risk
+        else:
+            trans_h = np.linalg.matrix_power(trans_scaled, horizon)
+            if use_soft:
+                future_dist = current_theta @ trans_h
+            else:
+                current_state = current_theta.argmax()
+                future_dist = trans_h[current_state]
+        
+        # Build results
+        if target_topics is None:
+            target_topics = list(range(min(10, self.K)))
+        
+        risks = {}
+        for topic_idx in target_topics:
+            if topic_idx < self.num_states:
+                risks[f'topic_{topic_idx}'] = float(future_dist[topic_idx])
+        
+        risks['max_risk_topic'] = int(future_dist.argmax())
+        risks['max_risk'] = float(future_dist.max())
+        risks['entropy'] = float(-np.sum(future_dist * np.log(future_dist + mini_val)))
+        
+        # Comparison with stationary
+        stationary = self.get_stationary_distribution()
+        kl_from_stationary = np.sum(future_dist * np.log((future_dist + mini_val) / (stationary + mini_val)))
+        risks['kl_from_stationary'] = float(kl_from_stationary)
+        
+        # Report calibration settings
+        risks['temperature'] = temperature
+        risks['use_soft'] = use_soft
+        
+        return risks
+    
+    def evaluate_calibration(self, theta_sequences: Dict[str, torch.Tensor],
+                            temperature: float = 1.0) -> Dict[str, float]:
+        """
+        Evaluate calibration of predictions using held-out one-step transitions.
+        
+        Computes:
+        - Brier score (lower is better)
+        - Negative log-likelihood (lower is better)
+        - Empirical vs predicted next-state accuracy
+        
+        Args:
+            theta_sequences: Dict mapping patient_id to theta sequence (T x K)
+            temperature: Temperature for calibrated predictions
+            
+        Returns:
+            Dict with calibration metrics
+        """
+        if self.transition_matrix is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+        
+        # Apply temperature scaling
+        if temperature != 1.0:
+            log_trans = np.log(self.transition_matrix + mini_val)
+            scaled_log_trans = log_trans / temperature
+            trans_scaled = np.exp(scaled_log_trans)
+            trans_scaled = trans_scaled / trans_scaled.sum(axis=1, keepdims=True)
+        else:
+            trans_scaled = self.transition_matrix
+        
+        brier_scores = []
+        nll_scores = []
+        accuracies_hard = []  # argmax prediction accuracy
+        accuracies_soft = []  # soft prediction accuracy (prob mass on true state)
+        
+        for patient_id, theta_seq in theta_sequences.items():
+            if torch.is_tensor(theta_seq):
+                theta_seq = theta_seq.cpu().numpy()
+            
+            T = theta_seq.shape[0]
+            if T < 2:
+                continue
+            
+            for t in range(T - 1):
+                current_theta = theta_seq[t]
+                next_theta = theta_seq[t + 1]
+                true_next_state = next_theta.argmax()
+                
+                # Soft prediction (weighted by current theta)
+                pred_dist_soft = current_theta @ trans_scaled
+                
+                # Hard prediction (from dominant state)
+                current_state = current_theta.argmax()
+                pred_dist_hard = trans_scaled[current_state]
+                
+                # Brier score for soft prediction (vs one-hot true state)
+                true_onehot = np.zeros(self.num_states)
+                true_onehot[true_next_state] = 1.0
+                brier = np.mean((pred_dist_soft - true_onehot) ** 2)
+                brier_scores.append(brier)
+                
+                # NLL for soft prediction
+                nll = -np.log(pred_dist_soft[true_next_state] + mini_val)
+                nll_scores.append(nll)
+                
+                # Accuracy
+                accuracies_hard.append(1.0 if pred_dist_hard.argmax() == true_next_state else 0.0)
+                accuracies_soft.append(pred_dist_soft[true_next_state])  # Probability mass on true state
+        
+        results = {
+            'brier_score': float(np.mean(brier_scores)),
+            'nll': float(np.mean(nll_scores)),
+            'accuracy_hard': float(np.mean(accuracies_hard)),
+            'mean_prob_true_state': float(np.mean(accuracies_soft)),
+            'num_transitions': len(brier_scores),
+            'temperature': temperature
+        }
+        
+        # Interpretation
+        results['calibration_notes'] = []
+        if results['brier_score'] > 0.1:
+            results['calibration_notes'].append(f"High Brier score ({results['brier_score']:.4f}) - predictions may be poorly calibrated")
+        if results['nll'] > 5:
+            results['calibration_notes'].append(f"High NLL ({results['nll']:.2f}) - predictions assign low prob to true states")
+        if results['mean_prob_true_state'] < 0.1:
+            results['calibration_notes'].append(f"Low mean prob on true state ({results['mean_prob_true_state']:.4f}) - model under-confident or misspecified")
         
         return results
     

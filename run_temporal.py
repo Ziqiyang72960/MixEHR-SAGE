@@ -570,6 +570,10 @@ def predict_disease_risk(args):
     1. Predict for a specific patient from theta_sequences.csv using --patient-id
     2. Predict for all patients from theta_sequences.csv (batch mode) using --batch
     3. Predict using direct theta values using --theta
+    
+    New options for calibration:
+    - --temperature: Scale prediction confidence (>1 = less confident)
+    - --soft: Use soft prediction to preserve uncertainty
     """
     logger.info("Predicting disease risk...")
     
@@ -581,6 +585,10 @@ def predict_disease_risk(args):
     else:
         raise ValueError("Currently only Markov models (.pkl) are supported for prediction")
     
+    # Get calibration options
+    temperature = getattr(args, 'temperature', 1.0)
+    use_soft = getattr(args, 'soft', False)
+    
     # Determine input mode and load patient data
     if args.theta_sequences:
         # Load from theta_sequences.csv (output from train_from_scratch or compute_theta)
@@ -589,7 +597,7 @@ def predict_disease_risk(args):
         
         if args.batch:
             # Batch mode: predict for all patients
-            return predict_batch(markov, df, theta_cols, args)
+            return predict_batch(markov, df, theta_cols, args, temperature, use_soft)
         elif args.patient_id is not None:
             # Specific patient
             patient_df = df[df['patient_id'] == args.patient_id]
@@ -635,12 +643,32 @@ def predict_disease_risk(args):
         print("   python run_temporal.py predict_risk \\")
         print("       --model ./results/markov_model.pkl \\")
         print("       --theta '0.1,0.2,0.3,...'")
+        print("\n4. With calibration options (for over-confident predictions):")
+        print("   python run_temporal.py predict_risk \\")
+        print("       --model ./results/markov_model.pkl \\")
+        print("       --theta-sequences ./results/theta.csv \\")
+        print("       --patient-id 12345 --temperature 2.0 --soft")
         raise ValueError("Must provide --theta-sequences, --patient, or --theta")
     
-    # Predict risk
+    # Predict risk - use calibrated method if temperature != 1.0 or soft is requested
     cumulative = getattr(args, 'cumulative', False)
-    risk = markov.predict_disease_risk(current_theta, horizon=args.horizon, cumulative=cumulative)
-    next_state = markov.predict_next_state(current_theta)
+    
+    if temperature != 1.0 or use_soft:
+        risk = markov.predict_disease_risk_calibrated(
+            current_theta, 
+            horizon=args.horizon, 
+            temperature=temperature,
+            use_soft=use_soft,
+            cumulative=cumulative
+        )
+        # Get next state using appropriate method
+        if use_soft:
+            next_state = markov.predict_next_state_soft(current_theta)
+        else:
+            next_state = markov.predict_next_state(current_theta)
+    else:
+        risk = markov.predict_disease_risk(current_theta, horizon=args.horizon, cumulative=cumulative)
+        next_state = markov.predict_next_state(current_theta)
     
     # Print results
     print("\n" + "=" * 50)
@@ -649,6 +677,13 @@ def predict_disease_risk(args):
     print(f"Input: {patient_info}")
     print(f"Prediction horizon: {args.horizon} time steps")
     print(f"Risk type: {'Cumulative (any time in horizon)' if cumulative else 'Exact step'}")
+    
+    # Show calibration settings
+    if temperature != 1.0 or use_soft:
+        print(f"\nCalibration settings:")
+        print(f"  Temperature: {temperature} {'(less confident)' if temperature > 1 else '(more confident)' if temperature < 1 else ''}")
+        print(f"  Soft prediction: {'Yes (preserving theta uncertainty)' if use_soft else 'No (using dominant state)'}")
+    
     print(f"\nCurrent top 3 topics: {np.argsort(current_theta)[::-1][:3]}")
     print(f"Current top 3 probabilities: {np.sort(current_theta)[::-1][:3]}")
     print(f"\nPredicted next state distribution:")
@@ -666,6 +701,8 @@ def predict_disease_risk(args):
         results = {
             'patient_info': patient_info,
             'horizon': args.horizon,
+            'temperature': temperature,
+            'use_soft': use_soft,
             'current_theta': current_theta.tolist(),
             'next_state_distribution': next_state.tolist(),
             'risk': risk
@@ -678,9 +715,10 @@ def predict_disease_risk(args):
     return risk
 
 
-def predict_batch(markov, df, theta_cols, args):
+def predict_batch(markov, df, theta_cols, args, temperature=1.0, use_soft=False):
     """Predict disease risk for all patients in batch mode."""
     logger.info("Running batch prediction for all patients...")
+    logger.info(f"Calibration: temperature={temperature}, use_soft={use_soft}")
     
     results = []
     patients = df['patient_id'].unique()
@@ -693,9 +731,24 @@ def predict_batch(markov, df, theta_cols, args):
         current_theta = patient_df[theta_cols].values[-1]
         last_time = patient_df['time_index'].iloc[-1]
         
-        # Predict
-        risk = markov.predict_disease_risk(current_theta, horizon=args.horizon)
-        next_state = markov.predict_next_state(current_theta)
+        # Predict with calibration options
+        cumulative = getattr(args, 'cumulative', False)
+        
+        if temperature != 1.0 or use_soft:
+            risk = markov.predict_disease_risk_calibrated(
+                current_theta, 
+                horizon=args.horizon,
+                temperature=temperature,
+                use_soft=use_soft,
+                cumulative=cumulative
+            )
+            if use_soft:
+                next_state = markov.predict_next_state_soft(current_theta)
+            else:
+                next_state = markov.predict_next_state(current_theta)
+        else:
+            risk = markov.predict_disease_risk(current_theta, horizon=args.horizon, cumulative=cumulative)
+            next_state = markov.predict_next_state(current_theta)
         
         results.append({
             'patient_id': patient_id,
@@ -765,7 +818,34 @@ def diagnose_markov_model(args):
     print(f"Min row variance: {diag['min_row_variance']:.6e}")
     print(f"Mean pairwise L1 distance: {diag['mean_pairwise_l1']:.4f}")
     
-    print(f"\nStationary distribution entropy: {diag['stationary_entropy']:.4f}")
+    # Diagonal dominance / stickiness analysis
+    print("\n" + "-" * 60)
+    print("DIAGONAL DOMINANCE (STICKINESS) ANALYSIS")
+    print("-" * 60)
+    print(f"Mean P(i→i): {diag['diagonal_mean']:.4f}")
+    print(f"Median P(i→i): {diag['diagonal_median']:.4f}")
+    print(f"Max P(i→i): {diag['diagonal_max']:.4f}")
+    print(f"Min P(i→i): {diag['diagonal_min']:.4f}")
+    print(f"Std P(i→i): {diag['diagonal_std']:.4f}")
+    print(f"\nSticky states (P(i→i) > 0.9): {diag['num_sticky_states_90']} ({diag['pct_sticky_states_90']:.1%})")
+    print(f"Sticky states (P(i→i) > 0.5): {diag['num_sticky_states_50']} ({diag['pct_sticky_states_50']:.1%})")
+    
+    # Row entropy analysis
+    print("\n" + "-" * 60)
+    print("ROW ENTROPY (SUCCESSOR DIVERSITY)")
+    print("-" * 60)
+    print(f"Mean row entropy: {diag['mean_row_entropy']:.4f}")
+    print(f"Min row entropy: {diag['min_row_entropy']:.4f}")
+    print(f"Max row entropy: {diag['max_row_entropy']:.4f}")
+    print(f"Mean effective successors: {diag['mean_effective_successors']:.1f} (out of {markov.K})")
+    print(f"Min effective successors: {diag['min_effective_successors']:.1f}")
+    print(f"Mean top-5 successor mass: {diag['mean_top5_successor_mass']:.4f}")
+    
+    # Stationary distribution
+    print(f"\n" + "-" * 60)
+    print("STATIONARY DISTRIBUTION & MIXING")
+    print("-" * 60)
+    print(f"Stationary distribution entropy: {diag['stationary_entropy']:.4f}")
     print(f"Uniform entropy (ln K): {diag['uniform_entropy']:.4f}")
     entropy_ratio = diag['stationary_entropy'] / diag['uniform_entropy']
     print(f"Entropy ratio: {entropy_ratio:.4f} (1.0 = uniform)")
@@ -775,6 +855,8 @@ def diagnose_markov_model(args):
         print(f"Approx mixing time: {diag.get('mixing_time_approx', 'N/A'):.1f} steps")
     
     print(f"\nRaw counts sparsity: {diag['raw_counts_sparsity']:.4f}")
+    if 'raw_diagonal_ratio_mean' in diag:
+        print(f"Raw diagonal ratio (mean): {diag['raw_diagonal_ratio_mean']:.4f}")
     
     # Recommendations
     if diag['recommendations']:
@@ -801,17 +883,23 @@ def diagnose_markov_model(args):
             patient_df = df[df['patient_id'] == patient_id].sort_values('time_index')
             current_theta = patient_df[theta_cols].values[-1]
             
-            # Compare h=1 and h=6
+            # Compare h=1 and h=6 with both hard and soft predictions
             risk_h1 = markov.predict_disease_risk(current_theta, horizon=1)
             risk_h6 = markov.predict_disease_risk(current_theta, horizon=6)
+            
+            # Soft predictions
+            risk_h1_soft = markov.predict_disease_risk_calibrated(current_theta, horizon=1, use_soft=True)
+            risk_h6_soft = markov.predict_disease_risk_calibrated(current_theta, horizon=6, use_soft=True)
             
             # Also get stationary distribution
             stationary = markov.get_stationary_distribution()
             
             print(f"\nPatient {patient_id}:")
             print(f"  Current top topic: {np.argmax(current_theta)}")
-            print(f"  h=1: max_risk_topic={risk_h1['max_risk_topic']}, prob={risk_h1['max_risk']:.4f}, entropy={risk_h1['entropy']:.4f}")
-            print(f"  h=6: max_risk_topic={risk_h6['max_risk_topic']}, prob={risk_h6['max_risk']:.4f}, entropy={risk_h6['entropy']:.4f}")
+            print(f"  h=1 (hard): max_risk_topic={risk_h1['max_risk_topic']}, prob={risk_h1['max_risk']:.4f}, entropy={risk_h1['entropy']:.4f}")
+            print(f"  h=1 (soft): max_risk_topic={risk_h1_soft['max_risk_topic']}, prob={risk_h1_soft['max_risk']:.4f}, entropy={risk_h1_soft['entropy']:.4f}")
+            print(f"  h=6 (hard): max_risk_topic={risk_h6['max_risk_topic']}, prob={risk_h6['max_risk']:.4f}, entropy={risk_h6['entropy']:.4f}")
+            print(f"  h=6 (soft): max_risk_topic={risk_h6_soft['max_risk_topic']}, prob={risk_h6_soft['max_risk']:.4f}, entropy={risk_h6_soft['entropy']:.4f}")
             print(f"  Stationary: max_topic={np.argmax(stationary)}, max_prob={stationary.max():.4f}")
             
             # KL divergence from stationary
@@ -828,20 +916,125 @@ def diagnose_markov_model(args):
     print("QUICK FIXES TO TRY")
     print("=" * 60)
     print("""
-1. Lower smoothing (most impactful for large K):
-   python run_temporal.py train_markov --theta ... --smoothing 1e-4 --diagnose
+1. For over-confident/sticky predictions (high diagonal):
+   python run_temporal.py predict_risk --model ... --soft --temperature 2.0
+   python run_temporal.py train_markov --theta ... --discretization soft --smoothing 1e-3
 
-2. Use dominant discretization instead of soft:
-   python run_temporal.py train_markov --theta ... --discretization dominant --diagnose
+2. For near-uniform predictions (low row variance):
+   python run_temporal.py train_markov --theta ... --smoothing 1e-4 --discretization dominant
 
 3. Use horizon=1 for short-term predictions:
    python run_temporal.py predict_risk --model ... --horizon 1
 
 4. Use cumulative risk instead of exact-step risk:
    python run_temporal.py predict_risk --model ... --horizon 6 --cumulative
+
+5. Evaluate calibration to find optimal temperature:
+   python run_temporal.py evaluate_calibration --model ... --theta-sequences ... --search-temperature
 """)
     
     return diag
+
+
+def evaluate_calibration(args):
+    """Evaluate prediction calibration using held-out transitions."""
+    logger.info("Evaluating prediction calibration...")
+    
+    # Load model
+    markov = MarkovTransitionModel.load(args.model)
+    
+    # Load theta sequences and convert to dict
+    df = pd.read_csv(args.theta_sequences)
+    theta_cols = [c for c in df.columns if c.startswith('theta_')]
+    
+    theta_sequences = {}
+    for patient_id in df['patient_id'].unique():
+        patient_df = df[df['patient_id'] == patient_id].sort_values('time_index')
+        theta_seq = patient_df[theta_cols].values
+        theta_sequences[patient_id] = torch.tensor(theta_seq, dtype=torch.double)
+    
+    print("\n" + "=" * 60)
+    print("CALIBRATION EVALUATION")
+    print("=" * 60)
+    print(f"Model: {args.model}")
+    print(f"Theta sequences: {args.theta_sequences}")
+    print(f"Number of patients: {len(theta_sequences)}")
+    
+    if args.search_temperature:
+        # Search for optimal temperature
+        temperatures = [0.5, 1.0, 2.0, 5.0, 10.0]
+        print("\n" + "-" * 60)
+        print("TEMPERATURE SEARCH")
+        print("-" * 60)
+        print(f"{'Temp':>6} | {'Brier':>8} | {'NLL':>8} | {'Acc':>6} | {'P(true)':>8}")
+        print("-" * 50)
+        
+        best_temp = 1.0
+        best_brier = float('inf')
+        
+        for temp in temperatures:
+            results = markov.evaluate_calibration(theta_sequences, temperature=temp)
+            print(f"{temp:>6.1f} | {results['brier_score']:>8.4f} | {results['nll']:>8.2f} | {results['accuracy_hard']:>6.2%} | {results['mean_prob_true_state']:>8.4f}")
+            
+            if results['brier_score'] < best_brier:
+                best_brier = results['brier_score']
+                best_temp = temp
+        
+        print("-" * 50)
+        print(f"\nBest temperature: {best_temp} (Brier = {best_brier:.4f})")
+        print(f"\nRecommendation: Use --temperature {best_temp} with predict_risk")
+    else:
+        # Single temperature evaluation
+        results = markov.evaluate_calibration(theta_sequences, temperature=args.temperature)
+        
+        print(f"\n" + "-" * 60)
+        print(f"RESULTS (temperature={args.temperature})")
+        print("-" * 60)
+        print(f"Brier score: {results['brier_score']:.4f} (lower is better, <0.1 is good)")
+        print(f"Negative log-likelihood: {results['nll']:.2f} (lower is better)")
+        print(f"Hard prediction accuracy: {results['accuracy_hard']:.2%}")
+        print(f"Mean probability on true state: {results['mean_prob_true_state']:.4f}")
+        print(f"Number of transitions evaluated: {results['num_transitions']}")
+        
+        if results['calibration_notes']:
+            print("\nNotes:")
+            for note in results['calibration_notes']:
+                print(f"  - {note}")
+        
+        print("\n" + "-" * 60)
+        print("INTERPRETATION")
+        print("-" * 60)
+        if results['brier_score'] < 0.05:
+            print("✅ Excellent calibration (Brier < 0.05)")
+        elif results['brier_score'] < 0.1:
+            print("✅ Good calibration (Brier < 0.1)")
+        elif results['brier_score'] < 0.2:
+            print("⚠️ Moderate calibration (0.1 < Brier < 0.2)")
+        else:
+            print("❌ Poor calibration (Brier > 0.2)")
+        
+        if results['mean_prob_true_state'] > 0.5:
+            print("✅ Model assigns high probability to true states on average")
+        elif results['mean_prob_true_state'] > 0.1:
+            print("⚠️ Model assigns moderate probability to true states")
+        else:
+            print("❌ Model assigns low probability to true states - consider soft discretization or higher temperature")
+    
+    print("\n" + "-" * 60)
+    print("SUGGESTED COMMANDS")
+    print("-" * 60)
+    print("""
+# If predictions are over-confident (diagonal-dominant):
+python run_temporal.py predict_risk --model ... --temperature 2.0 --soft
+
+# Re-train with soft discretization:
+python run_temporal.py train_markov --theta ... --discretization soft --smoothing 1e-3
+
+# Use short horizon for more meaningful predictions:
+python run_temporal.py predict_risk --model ... --horizon 1
+""")
+    
+    return results
 
 
 def run_demo(args):
@@ -1145,6 +1338,10 @@ def main():
                             help='Prediction horizon (time steps into future)')
     parser_risk.add_argument('--cumulative', action='store_true',
                             help='Use cumulative risk (any time in horizon) instead of exact step')
+    parser_risk.add_argument('--temperature', type=float, default=1.0,
+                            help='Temperature for calibrated predictions (>1 = less confident, <1 = more confident). Try 2.0-5.0 if predictions are over-confident.')
+    parser_risk.add_argument('--soft', action='store_true',
+                            help='Use soft prediction (weight rows by full theta distribution). Recommended for diagonal-dominant matrices.')
     parser_risk.add_argument('--output', help='Output path for predictions (JSON or CSV for batch)')
     
     # diagnose_markov command
@@ -1158,6 +1355,18 @@ def main():
                             help='Path to theta_sequences.csv for comparing predictions')
     parser_diag.add_argument('--num-samples', type=int, default=5,
                             help='Number of sample patients for comparison')
+    
+    # evaluate_calibration command
+    parser_eval = subparsers.add_parser('evaluate_calibration',
+                                        help='Evaluate prediction calibration using held-out transitions')
+    parser_eval.add_argument('--model', required=True,
+                            help='Path to trained Markov model (.pkl)')
+    parser_eval.add_argument('--theta-sequences', required=True,
+                            help='Path to theta_sequences.csv (used for evaluation)')
+    parser_eval.add_argument('--temperature', type=float, default=1.0,
+                            help='Temperature for calibration (try 1.0, 2.0, 5.0)')
+    parser_eval.add_argument('--search-temperature', action='store_true',
+                            help='Search for optimal temperature (tries 0.5, 1.0, 2.0, 5.0, 10.0)')
     
     # demo command
     parser_demo = subparsers.add_parser('demo',
@@ -1181,6 +1390,8 @@ def main():
         predict_disease_risk(args)
     elif args.command == 'diagnose_markov':
         diagnose_markov_model(args)
+    elif args.command == 'evaluate_calibration':
+        evaluate_calibration(args)
     elif args.command == 'demo':
         run_demo(args)
     else:
