@@ -109,11 +109,19 @@ python run_temporal.py train_markov \
     --theta ./results/temporal/theta_sequences.csv \
     --output ./results/temporal/markov_model.pkl
 
-# Step 3: Predict disease risk
+# Step 3: Predict disease risk for a specific patient
 python run_temporal.py predict_risk \
     --model ./results/temporal/markov_model.pkl \
-    --patient ./patient_theta.csv \
+    --theta-sequences ./results/temporal/theta_sequences.csv \
+    --patient-id 12345 \
     --horizon 3
+
+# Step 4: Predict disease risk for ALL patients (batch mode)
+python run_temporal.py predict_risk \
+    --model ./results/temporal/markov_model.pkl \
+    --theta-sequences ./results/temporal/theta_sequences.csv \
+    --batch \
+    --output ./results/temporal/batch_predictions.csv
 ```
 
 ### Training from Scratch (without pre-trained phi)
@@ -181,11 +189,19 @@ python run_temporal.py train_markov \
 **Step 2: Predict Future Disease Risk**
 
 ```bash
-# For a specific patient's current state
+# For a specific patient from the theta_sequences file
 python run_temporal.py predict_risk \
     --model ./results/markov_model.pkl \
-    --patient ./patient_theta.csv \
+    --theta-sequences ./results/temporal_scratch_theta_sequences.csv \
+    --patient-id 12345 \
     --horizon 3
+
+# For ALL patients (batch mode)
+python run_temporal.py predict_risk \
+    --model ./results/markov_model.pkl \
+    --theta-sequences ./results/temporal_scratch_theta_sequences.csv \
+    --batch \
+    --output ./results/batch_predictions.csv
 ```
 
 **Step 3: Analyze Disease Trajectories**
@@ -488,6 +504,7 @@ patient_001,1,topic_1,3,0.045,0.038,0.045,0.032,0.038,0.005,stable,-0.007
 
 ```json
 {
+  "patient_info": "Patient 12345",
   "horizon": 3,
   "current_theta": [0.123, 0.045, ...],
   "next_state_distribution": [0.142, 0.051, ...],
@@ -499,6 +516,124 @@ patient_001,1,topic_1,3,0.045,0.038,0.045,0.032,0.038,0.005,stable,-0.007
     "entropy": 2.156
   }
 }
+```
+
+### Batch Predictions CSV
+
+When using `--batch` mode, the output CSV contains:
+
+```csv
+patient_id,last_time_index,num_time_points,current_dominant_topic,predicted_next_topic,max_risk_topic,max_risk_prob,entropy,horizon
+12345,2020,5,3,3,3,0.234,2.156,3
+12346,2019,3,7,7,7,0.312,1.876,3
+```
+
+**Columns explained:**
+- `patient_id`: Patient identifier
+- `last_time_index`: Last observed time point
+- `num_time_points`: Number of time points in patient history
+- `current_dominant_topic`: Topic with highest probability currently
+- `predicted_next_topic`: Most likely dominant topic in next time step
+- `max_risk_topic`: Topic with highest risk at the prediction horizon
+- `max_risk_prob`: Probability of that maximum risk topic
+- `entropy`: Prediction uncertainty (higher = more uncertain)
+- `horizon`: Number of time steps predicted ahead
+
+## Disease Risk Prediction Guide
+
+### Quick Start
+
+After training, use the predict_risk command:
+
+```bash
+# For a specific patient
+python run_temporal.py predict_risk \
+    --model ./results/markov_model.pkl \
+    --theta-sequences ./results/temporal_scratch_theta_sequences.csv \
+    --patient-id 12345 \
+    --horizon 3
+
+# For all patients (batch mode)
+python run_temporal.py predict_risk \
+    --model ./results/markov_model.pkl \
+    --theta-sequences ./results/temporal_scratch_theta_sequences.csv \
+    --batch \
+    --output ./results/predictions.csv
+```
+
+### Arguments Explained
+
+| Argument | Description |
+|----------|-------------|
+| `--model` | Path to trained Markov model (.pkl) |
+| `--theta-sequences` | Path to theta_sequences.csv from training |
+| `--patient-id` | Specific patient ID to predict for |
+| `--batch` | Predict for all patients |
+| `--horizon` | Number of time steps to predict ahead (default: 1) |
+| `--output` | Output file path (JSON for single, CSV for batch) |
+
+### Interpreting Results
+
+**Single Patient Output:**
+```
+==================================================
+DISEASE RISK PREDICTION
+==================================================
+Input: Patient 12345
+Prediction horizon: 3 time steps
+
+Current top 3 topics: [5, 12, 3]
+Current top 3 probabilities: [0.234, 0.156, 0.098]
+
+Predicted next state distribution:
+  Top 3 likely states: [5, 12, 7]
+  Top 3 probabilities: [0.256, 0.142, 0.087]
+
+3-step risk:
+  Max risk topic: 5
+  Max risk probability: 0.312
+  Entropy: 2.156
+```
+
+**What this means:**
+- **Current top topics**: Patient's current disease profile (highest topic probabilities)
+- **Predicted next state**: Expected disease profile at next time step
+- **Max risk topic**: The topic most likely to dominate at the prediction horizon
+- **Entropy**: Lower entropy = more confident prediction
+
+### Python API for Risk Prediction
+
+```python
+from temporal_models import MarkovTransitionModel
+import pandas as pd
+import numpy as np
+
+# Load model and data
+markov = MarkovTransitionModel.load('./results/markov_model.pkl')
+theta_df = pd.read_csv('./results/theta_sequences.csv')
+
+# Get a patient's current state
+patient_id = 12345
+patient_data = theta_df[theta_df['patient_id'] == patient_id]
+patient_data = patient_data.sort_values('time_index')
+
+# Get theta columns
+theta_cols = [c for c in patient_data.columns if c.startswith('theta_')]
+current_theta = patient_data[theta_cols].values[-1]
+
+# Predict next state
+next_state = markov.predict_next_state(current_theta)
+print(f"Most likely next dominant topic: {np.argmax(next_state)}")
+
+# Predict risk at horizon H
+risk = markov.predict_disease_risk(current_theta, horizon=3)
+print(f"Max risk topic at horizon 3: {risk['max_risk_topic']}")
+print(f"Max risk probability: {risk['max_risk']:.4f}")
+
+# Multi-step prediction trajectory
+for h in range(1, 6):
+    risk = markov.predict_disease_risk(current_theta, horizon=h)
+    print(f"Horizon {h}: Topic {risk['max_risk_topic']} with prob {risk['max_risk']:.4f}")
 ```
 
 ## Example Workflow

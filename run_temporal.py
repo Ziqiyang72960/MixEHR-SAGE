@@ -505,19 +505,27 @@ def train_from_scratch(args):
     print(f"       --theta {theta_output} \\")
     print(f"       --output {phi_output_dir}/markov_model.pkl")
     
-    print("\n2. Predict future disease risk:")
+    print("\n2. Predict disease risk for a specific patient:")
     print(f"   python run_temporal.py predict_risk \\")
     print(f"       --model {phi_output_dir}/markov_model.pkl \\")
-    print(f"       --patient <patient_theta.csv> \\")
+    print(f"       --theta-sequences {theta_output} \\")
+    print(f"       --patient-id <PATIENT_ID> \\")
     print(f"       --horizon 3")
     
-    print("\n3. Visualize disease trajectories (Python):")
+    print("\n3. Predict disease risk for ALL patients (batch mode):")
+    print(f"   python run_temporal.py predict_risk \\")
+    print(f"       --model {phi_output_dir}/markov_model.pkl \\")
+    print(f"       --theta-sequences {theta_output} \\")
+    print(f"       --batch \\")
+    print(f"       --output {phi_output_dir}/batch_predictions.csv")
+    
+    print("\n4. Visualize disease trajectories (Python):")
     print("   import pandas as pd")
     print("   import matplotlib.pyplot as plt")
     print(f"   theta_df = pd.read_csv('{theta_output}')")
     print("   # Plot theta values over time for a patient")
     
-    print("\n4. Interpret topics using learned phi (Python):")
+    print("\n5. Interpret topics using learned phi (Python):")
     print("   import torch")
     print(f"   phi = torch.load('{phi_output_dir}/learned_phi_icd.pt')")
     print("   # phi[word_id, topic_id] = P(word | topic)")
@@ -529,7 +537,13 @@ def train_from_scratch(args):
 
 
 def predict_disease_risk(args):
-    """Predict disease risk using trained model."""
+    """Predict disease risk using trained model.
+    
+    This command can be used in several ways:
+    1. Predict for a specific patient from theta_sequences.csv using --patient-id
+    2. Predict for all patients from theta_sequences.csv (batch mode) using --batch
+    3. Predict using direct theta values using --theta
+    """
     logger.info("Predicting disease risk...")
     
     # Load model
@@ -540,17 +554,61 @@ def predict_disease_risk(args):
     else:
         raise ValueError("Currently only Markov models (.pkl) are supported for prediction")
     
-    # Load patient data
-    if args.patient:
-        # Single patient from file
+    # Determine input mode and load patient data
+    if args.theta_sequences:
+        # Load from theta_sequences.csv (output from train_from_scratch or compute_theta)
+        df = pd.read_csv(args.theta_sequences)
+        theta_cols = [c for c in df.columns if c.startswith('theta_')]
+        
+        if args.batch:
+            # Batch mode: predict for all patients
+            return predict_batch(markov, df, theta_cols, args)
+        elif args.patient_id is not None:
+            # Specific patient
+            patient_df = df[df['patient_id'] == args.patient_id]
+            if len(patient_df) == 0:
+                available = df['patient_id'].unique()[:10].tolist()
+                raise ValueError(f"Patient {args.patient_id} not found. Available: {available}...")
+            # Use last time point for this patient
+            current_theta = patient_df.sort_values('time_index')[theta_cols].values[-1]
+            patient_info = f"Patient {args.patient_id}"
+        else:
+            # Default: use first patient
+            first_patient = df['patient_id'].iloc[0]
+            patient_df = df[df['patient_id'] == first_patient]
+            current_theta = patient_df.sort_values('time_index')[theta_cols].values[-1]
+            patient_info = f"Patient {first_patient} (first in file)"
+            print(f"Note: No --patient-id specified, using {patient_info}")
+    elif args.patient:
+        # Legacy: single patient file (backward compatibility)
         df = pd.read_csv(args.patient)
         theta_cols = [c for c in df.columns if c.startswith('theta_')]
-        current_theta = df[theta_cols].values[-1]  # Use last time point
+        current_theta = df[theta_cols].values[-1]
+        patient_info = f"Patient from {args.patient}"
     elif args.theta:
         # Direct theta values
         current_theta = np.array([float(x) for x in args.theta.split(',')])
+        patient_info = "Direct theta input"
     else:
-        raise ValueError("Must provide --patient or --theta")
+        print("\n" + "=" * 60)
+        print("ERROR: No patient data provided")
+        print("=" * 60)
+        print("\nUsage options:")
+        print("\n1. From theta_sequences.csv (recommended):")
+        print("   python run_temporal.py predict_risk \\")
+        print("       --model ./results/markov_model.pkl \\")
+        print("       --theta-sequences ./results/temporal_scratch_theta_sequences.csv \\")
+        print("       --patient-id 12345")
+        print("\n2. Batch mode (all patients):")
+        print("   python run_temporal.py predict_risk \\")
+        print("       --model ./results/markov_model.pkl \\")
+        print("       --theta-sequences ./results/temporal_scratch_theta_sequences.csv \\")
+        print("       --batch --output ./results/batch_predictions.csv")
+        print("\n3. Direct theta values:")
+        print("   python run_temporal.py predict_risk \\")
+        print("       --model ./results/markov_model.pkl \\")
+        print("       --theta '0.1,0.2,0.3,...'")
+        raise ValueError("Must provide --theta-sequences, --patient, or --theta")
     
     # Predict risk
     risk = markov.predict_disease_risk(current_theta, horizon=args.horizon)
@@ -560,6 +618,7 @@ def predict_disease_risk(args):
     print("\n" + "=" * 50)
     print("DISEASE RISK PREDICTION")
     print("=" * 50)
+    print(f"Input: {patient_info}")
     print(f"Prediction horizon: {args.horizon} time steps")
     print(f"\nCurrent top 3 topics: {np.argsort(current_theta)[::-1][:3]}")
     print(f"Current top 3 probabilities: {np.sort(current_theta)[::-1][:3]}")
@@ -574,6 +633,7 @@ def predict_disease_risk(args):
     # Save to file if specified
     if args.output:
         results = {
+            'patient_info': patient_info,
             'horizon': args.horizon,
             'current_theta': current_theta.tolist(),
             'next_state_distribution': next_state.tolist(),
@@ -585,6 +645,65 @@ def predict_disease_risk(args):
         logger.info(f"Saved predictions to {args.output}")
     
     return risk
+
+
+def predict_batch(markov, df, theta_cols, args):
+    """Predict disease risk for all patients in batch mode."""
+    logger.info("Running batch prediction for all patients...")
+    
+    results = []
+    patients = df['patient_id'].unique()
+    
+    for i, patient_id in enumerate(patients):
+        patient_df = df[df['patient_id'] == patient_id]
+        patient_df = patient_df.sort_values('time_index')
+        
+        # Use last time point for prediction
+        current_theta = patient_df[theta_cols].values[-1]
+        last_time = patient_df['time_index'].iloc[-1]
+        
+        # Predict
+        risk = markov.predict_disease_risk(current_theta, horizon=args.horizon)
+        next_state = markov.predict_next_state(current_theta)
+        
+        results.append({
+            'patient_id': patient_id,
+            'last_time_index': last_time,
+            'num_time_points': len(patient_df),
+            'current_dominant_topic': int(np.argmax(current_theta)),
+            'predicted_next_topic': int(np.argmax(next_state)),
+            'max_risk_topic': risk['max_risk_topic'],
+            'max_risk_prob': risk['max_risk'],
+            'entropy': risk['entropy'],
+            'horizon': args.horizon
+        })
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"Processed {i + 1}/{len(patients)} patients")
+    
+    results_df = pd.DataFrame(results)
+    
+    # Print summary
+    print("\n" + "=" * 60)
+    print("BATCH DISEASE RISK PREDICTION COMPLETE")
+    print("=" * 60)
+    print(f"Total patients: {len(results_df)}")
+    print(f"Prediction horizon: {args.horizon} time steps")
+    print(f"\nSummary statistics:")
+    print(f"  Mean entropy: {results_df['entropy'].mean():.4f}")
+    print(f"  Std entropy: {results_df['entropy'].std():.4f}")
+    print(f"\nMost common predicted dominant topics:")
+    print(results_df['predicted_next_topic'].value_counts().head(10))
+    
+    # Save to file
+    if args.output:
+        results_df.to_csv(args.output, index=False)
+        logger.info(f"Saved batch predictions to {args.output}")
+        print(f"\nResults saved to: {args.output}")
+    else:
+        print("\nTip: Use --output to save results to CSV")
+    
+    return results_df
 
 
 def run_demo(args):
@@ -869,14 +988,20 @@ def main():
     
     # predict_risk command
     parser_risk = subparsers.add_parser('predict_risk',
-                                        help='Predict disease risk')
+                                        help='Predict disease risk for patients')
     parser_risk.add_argument('--model', required=True,
-                            help='Path to trained model')
-    parser_risk.add_argument('--patient', help='Path to patient theta CSV')
-    parser_risk.add_argument('--theta', help='Comma-separated theta values')
+                            help='Path to trained Markov model (.pkl)')
+    parser_risk.add_argument('--theta-sequences', 
+                            help='Path to theta_sequences.csv (output from train_from_scratch)')
+    parser_risk.add_argument('--patient-id', type=int,
+                            help='Patient ID to predict for (use with --theta-sequences)')
+    parser_risk.add_argument('--batch', action='store_true',
+                            help='Predict for all patients in --theta-sequences')
+    parser_risk.add_argument('--patient', help='Path to single patient theta CSV (legacy)')
+    parser_risk.add_argument('--theta', help='Comma-separated theta values (direct input)')
     parser_risk.add_argument('--horizon', type=int, default=1,
-                            help='Prediction horizon (time steps)')
-    parser_risk.add_argument('--output', help='Output path for predictions')
+                            help='Prediction horizon (time steps into future)')
+    parser_risk.add_argument('--output', help='Output path for predictions (JSON or CSV for batch)')
     
     # demo command
     parser_demo = subparsers.add_parser('demo',
