@@ -78,9 +78,18 @@ This will:
 ### Full Pipeline
 
 ```bash
-# Step 1: Compute temporal theta sequences
+# Step 1: Compute temporal theta sequences (single file)
 python run_temporal.py compute_theta \
     --data ./data/temporal_data.csv \
+    --model-path ./results/ \
+    --output ./results/temporal/ \
+    --bucket-type yearly
+
+# Or use separate modality files
+python run_temporal.py compute_theta \
+    --icd ./data/temporal_icd.csv \
+    --med ./data/temporal_med.csv \
+    --opcs ./data/temporal_opcs.csv \
     --model-path ./results/ \
     --output ./results/temporal/ \
     --bucket-type yearly
@@ -99,6 +108,24 @@ python run_temporal.py predict_risk \
 
 ## Temporal Theta Computation
 
+### Input Data Formats
+
+**Option 1: Single file with modality column**
+```csv
+SUBJECT_ID,code,timestamp,modality
+patient_001,E11.9,2015-03-15,icd
+patient_001,A10BA02,2015-03-15,med
+```
+
+**Option 2: Separate files per modality**
+
+Each modality file contains:
+```csv
+SUBJECT_ID,code,timestamp
+patient_001,E11.9,2015-03-15
+patient_001,I10,2016-01-10
+```
+
 ### Bucketing Strategies
 
 | Strategy | Description | Use Case |
@@ -114,9 +141,19 @@ python run_temporal.py predict_risk \
 from temporal_corpus import TemporalCorpus
 from MixEHR_SAGE import MixEHR_SAGE
 
-# Load temporal data
+# Option 1: Load from single file
 corpus = TemporalCorpus.from_file(
     './data/temporal_data.csv',
+    bucket_type='yearly'
+)
+
+# Option 2: Load from separate modality files
+corpus = TemporalCorpus.from_modality_files(
+    {
+        'icd': './data/temporal_icd.csv',
+        'med': './data/temporal_med.csv',
+        'opcs': './data/temporal_opcs.csv'
+    },
     bucket_type='yearly'
 )
 

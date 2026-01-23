@@ -180,6 +180,47 @@ class TestTemporalCorpus(unittest.TestCase):
         
         self.assertEqual(corpus.num_patients, 2)
         self.assertEqual(corpus.total_time_steps, 4)
+    
+    def test_from_modality_files(self):
+        """Test loading corpus from separate modality files."""
+        # Create separate modality files
+        icd_path = os.path.join(self.temp_dir, 'temporal_icd.csv')
+        med_path = os.path.join(self.temp_dir, 'temporal_med.csv')
+        
+        # ICD data
+        icd_df = pd.DataFrame([
+            {'SUBJECT_ID': 'p001', 'code': 'E11.9', 'timestamp': '2015-03-15'},
+            {'SUBJECT_ID': 'p001', 'code': 'I10', 'timestamp': '2015-03-15'},
+            {'SUBJECT_ID': 'p001', 'code': 'E11.9', 'timestamp': '2016-06-20'},
+            {'SUBJECT_ID': 'p002', 'code': 'J44.1', 'timestamp': '2015-05-10'},
+        ])
+        icd_df.to_csv(icd_path, index=False)
+        
+        # Medication data
+        med_df = pd.DataFrame([
+            {'SUBJECT_ID': 'p001', 'code': 'A10BA02', 'timestamp': '2015-03-20'},
+            {'SUBJECT_ID': 'p001', 'code': 'C03AB01', 'timestamp': '2016-06-25'},
+            {'SUBJECT_ID': 'p002', 'code': 'R03AC02', 'timestamp': '2015-05-15'},
+        ])
+        med_df.to_csv(med_path, index=False)
+        
+        # Load from separate files
+        corpus = TemporalCorpus.from_modality_files(
+            {'icd': icd_path, 'med': med_path},
+            bucket_type='yearly'
+        )
+        
+        self.assertEqual(corpus.bucket_type, 'yearly')
+        self.assertEqual(len(corpus.patients), 2)
+        
+        # Patient p001 should have 2 buckets (2015, 2016)
+        self.assertEqual(corpus.patients['p001'].num_time_steps, 2)
+        
+        # Check that both modalities are present in buckets
+        p001_2015_bucket = corpus.patients['p001'].get_bucket(2015)
+        modalities_present = set(r['modality'] for r in p001_2015_bucket.records)
+        self.assertIn('icd', modalities_present)
+        self.assertIn('med', modalities_present)
 
 
 class TestMarkovTransitionModel(unittest.TestCase):

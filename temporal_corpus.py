@@ -244,6 +244,114 @@ class TemporalCorpus:
         df = read_data_file(file_path)
         return cls.from_dataframe(df, bucket_type=bucket_type, **kwargs)
     
+    @classmethod
+    def from_modality_files(cls, modality_files: Dict[str, str], bucket_type: str = 'yearly',
+                           subject_col: str = 'SUBJECT_ID',
+                           code_col: str = 'code',
+                           time_col: str = 'timestamp') -> 'TemporalCorpus':
+        """
+        Create TemporalCorpus from separate files for each modality.
+        
+        This allows temporal data to be stored in separate files per modality,
+        similar to how the standard MixEHR pipeline supports separate ICD, med,
+        and OPCS files.
+        
+        Args:
+            modality_files: Dict mapping modality name to file path
+                           e.g., {'icd': 'icd_temporal.csv', 'med': 'med_temporal.csv'}
+            bucket_type: Bucketing strategy ('yearly', 'monthly', 'quarterly', 'visit')
+            subject_col: Column name for patient ID
+            code_col: Column name for medical code
+            time_col: Column name for timestamp (or visit index for 'visit' bucket_type)
+            
+        Returns:
+            TemporalCorpus object
+            
+        Example:
+            corpus = TemporalCorpus.from_modality_files(
+                {
+                    'icd': './data/temporal_icd.csv',
+                    'med': './data/temporal_med.csv',
+                    'opcs': './data/temporal_opcs.csv'
+                },
+                bucket_type='yearly'
+            )
+            
+        Expected file format for each modality:
+            SUBJECT_ID,code,timestamp
+            patient_001,E11.9,2015-03-15
+            patient_001,I10,2016-01-10
+        """
+        corpus = cls(bucket_type=bucket_type)
+        
+        for modality_name, file_path in modality_files.items():
+            if file_path is None or not os.path.exists(file_path):
+                logger.warning(f"Skipping modality '{modality_name}': file not found at {file_path}")
+                continue
+            
+            logger.info(f"Loading temporal data for modality '{modality_name}' from {file_path}")
+            df = read_data_file(file_path)
+            
+            # Validate required columns
+            required_cols = [subject_col, code_col, time_col]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing columns {missing_cols} in {file_path} for modality '{modality_name}'")
+            
+            # Parse timestamps based on bucket type
+            if bucket_type == 'visit':
+                df[time_col] = pd.to_numeric(df[time_col], errors='coerce')
+            else:
+                df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+            
+            # Process each row
+            records_added = 0
+            for _, row in df.iterrows():
+                patient_id = str(row[subject_col])
+                code = str(row[code_col])
+                timestamp = row[time_col]
+                
+                # Skip invalid timestamps
+                if pd.isna(timestamp):
+                    continue
+                
+                # Get or create patient
+                if patient_id not in corpus.patients:
+                    corpus.patients[patient_id] = TemporalPatient(patient_id)
+                patient = corpus.patients[patient_id]
+                
+                # Compute bucket index and boundaries
+                bucket_info = corpus._compute_bucket_info(timestamp)
+                time_index = bucket_info['index']
+                start_time = bucket_info['start']
+                end_time = bucket_info['end']
+                
+                # Get or create bucket
+                bucket = patient.get_bucket(time_index)
+                if bucket is None:
+                    bucket = TemporalBucket(
+                        patient_id=patient_id,
+                        time_index=time_index,
+                        start_time=start_time,
+                        end_time=end_time,
+                        bucket_type=bucket_type
+                    )
+                    patient.add_bucket(bucket)
+                
+                # Add record to bucket with the modality from the file
+                bucket.add_record(code, modality_name, timestamp)
+                records_added += 1
+                
+                # Update global time bounds
+                if corpus.min_time is None or time_index < corpus.min_time:
+                    corpus.min_time = time_index
+                if corpus.max_time is None or time_index > corpus.max_time:
+                    corpus.max_time = time_index
+            
+            logger.info(f"  Added {records_added} records for modality '{modality_name}'")
+        
+        return corpus
+    
     def _compute_bucket_info(self, timestamp) -> Dict:
         """
         Compute bucket index and boundaries for a timestamp.

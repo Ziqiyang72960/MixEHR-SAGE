@@ -110,16 +110,39 @@ def compute_theta_sequences(args):
     vocab_mappings = load_vocab_mappings(args.mapping_path)
     modality_list = corpus.modalities
     
-    # Load temporal data
-    logger.info(f"Loading temporal data from {args.data}")
-    temporal_corpus = TemporalCorpus.from_file(
-        args.data,
-        bucket_type=args.bucket_type,
-        subject_col=args.subject_col,
-        code_col=args.code_col,
-        time_col=args.time_col,
-        modality_col=args.modality_col
-    )
+    # Check if using separate modality files or single file
+    modality_files = {}
+    if args.icd:
+        modality_files['icd'] = args.icd
+    if args.med:
+        modality_files['med'] = args.med
+    if args.opcs:
+        modality_files['opcs'] = args.opcs
+    
+    if modality_files:
+        # Load from separate modality files
+        logger.info(f"Loading temporal data from modality files: {modality_files}")
+        temporal_corpus = TemporalCorpus.from_modality_files(
+            modality_files,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col
+        )
+    elif args.data:
+        # Load from single file with modality column
+        logger.info(f"Loading temporal data from {args.data}")
+        temporal_corpus = TemporalCorpus.from_file(
+            args.data,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col,
+            modality_col=args.modality_col
+        )
+    else:
+        raise ValueError("Must provide either --data or modality-specific files (--icd, --med, --opcs)")
+    
     temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
     
     logger.info(f"Created temporal corpus: {temporal_corpus}")
@@ -229,15 +252,36 @@ def train_lstm_model(args):
     V = sum(len(v) for v in vocab_mappings.values())
     K = model.K
     
-    # Load temporal data
-    temporal_corpus = TemporalCorpus.from_file(
-        args.data,
-        bucket_type=args.bucket_type,
-        subject_col=args.subject_col,
-        code_col=args.code_col,
-        time_col=args.time_col,
-        modality_col=args.modality_col
-    )
+    # Load temporal data - support both single file and separate modality files
+    modality_files = {}
+    if hasattr(args, 'icd') and args.icd:
+        modality_files['icd'] = args.icd
+    if hasattr(args, 'med') and args.med:
+        modality_files['med'] = args.med
+    if hasattr(args, 'opcs') and args.opcs:
+        modality_files['opcs'] = args.opcs
+    
+    if modality_files:
+        logger.info(f"Loading temporal data from modality files: {modality_files}")
+        temporal_corpus = TemporalCorpus.from_modality_files(
+            modality_files,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col
+        )
+    elif args.data:
+        temporal_corpus = TemporalCorpus.from_file(
+            args.data,
+            bucket_type=args.bucket_type,
+            subject_col=args.subject_col,
+            code_col=args.code_col,
+            time_col=args.time_col,
+            modality_col=args.modality_col
+        )
+    else:
+        raise ValueError("Must provide either --data or modality-specific files (--icd, --med, --opcs)")
+    
     temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
     
     logger.info(f"Created temporal corpus: {temporal_corpus}")
@@ -514,7 +558,14 @@ def main():
     # compute_theta command
     parser_theta = subparsers.add_parser('compute_theta', parents=[common_parser],
                                          help='Compute temporal theta sequences')
-    parser_theta.add_argument('--data', required=True, help='Path to temporal data file')
+    parser_theta.add_argument('--data', default=None, 
+                             help='Path to temporal data file (single file with all modalities)')
+    parser_theta.add_argument('--icd', default=None,
+                             help='Path to temporal ICD codes file (alternative to --data)')
+    parser_theta.add_argument('--med', default=None,
+                             help='Path to temporal medication codes file (alternative to --data)')
+    parser_theta.add_argument('--opcs', default=None,
+                             help='Path to temporal OPCS procedure codes file (alternative to --data)')
     parser_theta.add_argument('--model-path', default='./results/',
                              help='Path to trained model directory')
     parser_theta.add_argument('--corpus-path', default='./store/',
@@ -552,7 +603,14 @@ def main():
     # train_lstm command
     parser_lstm = subparsers.add_parser('train_lstm', parents=[common_parser],
                                         help='Train LSTM temporal model')
-    parser_lstm.add_argument('--data', required=True, help='Path to temporal data file')
+    parser_lstm.add_argument('--data', default=None,
+                            help='Path to temporal data file (single file with all modalities)')
+    parser_lstm.add_argument('--icd', default=None,
+                            help='Path to temporal ICD codes file (alternative to --data)')
+    parser_lstm.add_argument('--med', default=None,
+                            help='Path to temporal medication codes file (alternative to --data)')
+    parser_lstm.add_argument('--opcs', default=None,
+                            help='Path to temporal OPCS procedure codes file (alternative to --data)')
     parser_lstm.add_argument('--model-path', default='./results/',
                             help='Path to trained MixEHR model')
     parser_lstm.add_argument('--corpus-path', default='./store/',

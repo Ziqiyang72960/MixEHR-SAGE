@@ -733,6 +733,21 @@ Input Data Format:
         help='Path to temporal patient data file (CSV with SUBJECT_ID, code, timestamp, modality columns)'
     )
     parser.add_argument(
+        '--temporal-icd',
+        default=None,
+        help='Path to temporal ICD codes file (alternative to --temporal-data)'
+    )
+    parser.add_argument(
+        '--temporal-med',
+        default=None,
+        help='Path to temporal medication codes file (alternative to --temporal-data)'
+    )
+    parser.add_argument(
+        '--temporal-opcs',
+        default=None,
+        help='Path to temporal OPCS procedure codes file (alternative to --temporal-data)'
+    )
+    parser.add_argument(
         '--bucket-type',
         choices=['yearly', 'monthly', 'quarterly', 'visit'],
         default='yearly',
@@ -932,17 +947,36 @@ Input Data Format:
         print(f"\nGenerating ChatGPT explanation prompts...")
         explanations = []
         
-        # Load temporal data if provided
+        # Load temporal data if provided (single file or separate modality files)
         temporal_corpus = None
         theta_sequences = None
-        if args.temporal_data:
+        
+        # Check for separate modality temporal files
+        temporal_modality_files = {}
+        if args.temporal_icd:
+            temporal_modality_files['icd'] = args.temporal_icd
+        if args.temporal_med:
+            temporal_modality_files['med'] = args.temporal_med
+        if args.temporal_opcs:
+            temporal_modality_files['opcs'] = args.temporal_opcs
+        
+        if temporal_modality_files or args.temporal_data:
             try:
                 from temporal_corpus import TemporalCorpus
-                print(f"Loading temporal data from {args.temporal_data}...")
-                temporal_corpus = TemporalCorpus.from_file(
-                    args.temporal_data,
-                    bucket_type=args.bucket_type
-                )
+                
+                if temporal_modality_files:
+                    print(f"Loading temporal data from modality files: {temporal_modality_files}")
+                    temporal_corpus = TemporalCorpus.from_modality_files(
+                        temporal_modality_files,
+                        bucket_type=args.bucket_type
+                    )
+                else:
+                    print(f"Loading temporal data from {args.temporal_data}...")
+                    temporal_corpus = TemporalCorpus.from_file(
+                        args.temporal_data,
+                        bucket_type=args.bucket_type
+                    )
+                
                 temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
                 
                 # Compute theta sequences
