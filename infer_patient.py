@@ -324,9 +324,13 @@ def load_phecode_ids_mapping(phecode_ids_path='./mapping/phecode_ids.pkl'):
 
 
 def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, vocab_mappings, 
-                                         modality_list, top_k_topics=5, top_n_codes=10):
+                                         modality_list, top_k_topics=5, top_n_codes=10,
+                                         temporal_data=None, markov_risk=None,
+                                         prediction_horizon=None):
     """
-    Generate a ChatGPT prompt to explain inferred phenotype probabilities for a patient.
+    Generate a ChatGPT prompt to explain inferred phenotype probabilities and predict future risks.
+    
+    Uses combined phi: φ_combined = π * φ^s + (1-π) * φ^r for the guided modality.
     
     Args:
         patient_id: patient identifier
@@ -337,13 +341,22 @@ def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, v
         modality_list: list of modality names
         top_k_topics: number of top topics to include (default: 5)
         top_n_codes: number of top codes per topic to include (default: 10)
+        temporal_data: optional dict with temporal information:
+            - 'theta_sequence': list of theta arrays over time
+            - 'time_labels': list of time labels (e.g., ['2015', '2016', '2017'])
+            - 'bucket_type': type of bucketing ('yearly', 'monthly', etc.)
+        markov_risk: optional dict with Markov model predictions:
+            - 'next_state_distribution': predicted next state probabilities
+            - 'risk': disease risk predictions at horizon
+        prediction_horizon: time horizon for risk prediction (e.g., 3 for 3 years)
     
     Returns:
-        str: formatted ChatGPT prompt
+        str: formatted ChatGPT prompt for disease risk interpretation and prediction
     """
     # Load PheCode definitions and mappings
     phecode_dict = load_phecode_definitions()
     inv_phecode_ids = load_phecode_ids_mapping()
+    
     # Convert theta to numpy if needed
     if torch.is_tensor(theta):
         theta_np = theta.cpu().numpy()
@@ -372,28 +385,48 @@ def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, v
         if codes:
             patient_records_by_modality[modality_name] = codes
     
-    # Get top codes for each of the top K topics based on phi
+    # Get combined phi for each topic: φ_combined = π * φ^s + (1-π) * φ^r
+    # This properly combines seed and regular word-topic distributions
     topic_top_codes = {}
+    pi = model.pi.cpu().numpy() if torch.is_tensor(model.pi) else model.pi
+    
     for topic_idx in top_topic_indices:
         topic_codes_by_modality = {}
         
         for m, modality_name in enumerate(modality_list):
             if modality_name not in vocab_mappings:
                 continue
-                
-            # Get phi for this modality
-            phi = model.get_phi(modality=m)  # V x K matrix
-            phi_np = phi.cpu().numpy()
             
-            # Get top N codes for this topic in this modality
-            topic_phi = phi_np[:, topic_idx]
-            top_code_indices = np.argsort(topic_phi)[::-1][:top_n_codes]
+            # Get regular phi for this modality
+            phi_regular = model.get_phi(modality=m)  # V x K matrix
+            phi_regular_np = phi_regular.cpu().numpy()
+            
+            if m == model.guided_modality:
+                # For guided modality, combine seed and regular phi
+                # φ_combined = π * φ^s + (1-π) * φ^r
+                phi_seed = model.get_phi_seed()  # V x K matrix
+                phi_seed_np = phi_seed.cpu().numpy()
+                seeds_matrix = model.seeds_topic_matrix.cpu().numpy()
+                
+                # Compute combined phi for this topic
+                pi_k = pi[topic_idx] if hasattr(pi, '__len__') else pi
+                phi_combined = np.where(
+                    seeds_matrix[:, topic_idx:topic_idx+1] > 0,
+                    pi_k * phi_seed_np[:, topic_idx] + (1 - pi_k) * phi_regular_np[:, topic_idx],
+                    phi_regular_np[:, topic_idx]
+                ).flatten()
+            else:
+                # For non-guided modality, just use regular phi
+                phi_combined = phi_regular_np[:, topic_idx]
+            
+            # Get top N codes for this topic
+            top_code_indices = np.argsort(phi_combined)[::-1][:top_n_codes]
             top_codes_info = []
             
             for code_idx in top_code_indices:
                 if code_idx in reverse_vocabs[modality_name]:
                     code = reverse_vocabs[modality_name][code_idx]
-                    prob = topic_phi[code_idx]
+                    prob = phi_combined[code_idx]
                     top_codes_info.append(f"{code} (φ={prob:.4f})")
             
             if top_codes_info:
@@ -402,10 +435,11 @@ def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, v
         topic_top_codes[topic_idx] = topic_codes_by_modality
     
     # Build the prompt
-    prompt = f"""I have a patient (ID: {patient_id}) and I used a topic modeling approach (MixEHR-SAGE) to infer their phenotype risk profile. Please help me interpret the results.
+    prompt = f"""I have a patient (ID: {patient_id}) and I used a seed-guided topic modeling approach (MixEHR-SAGE) to infer their phenotype risk profile. Please help me interpret the results and **predict future disease risks**.
 
-**Input 1: Top {top_k_topics} Inferred Topic Mixtures (θ)**
-These represent the patient's probability distribution over latent phenotypes/disease topics:
+**Input 1: Current Inferred Topic Mixtures (θ)**
+These represent the patient's probability distribution over latent disease phenotypes.
+The combined word-topic distribution φ_combined = π × φ^seed + (1-π) × φ^regular is used for interpretable phenotype mapping:
 """
     
     for i, (topic_idx, prob) in enumerate(zip(top_topic_indices, top_topic_probs), 1):
@@ -419,23 +453,71 @@ These represent the patient's probability distribution over latent phenotypes/di
             else:
                 topic_label = f"PheCode {phecode}"
         
-        prompt += f"\n  {topic_label}: {prob:.4f} ({prob*100:.2f}%)"
+        # Add pi value for guided modality
+        pi_k = pi[topic_idx] if hasattr(pi, '__len__') else pi
+        prompt += f"\n  {i}. {topic_label}: θ={prob:.4f} ({prob*100:.1f}%), π={pi_k:.3f}"
     
-    prompt += "\n\n**Input 2: Patient's Medical Records**\n"
-    prompt += "The actual medical codes observed for this patient:\n"
+    # Add temporal trajectory if available
+    if temporal_data is not None:
+        prompt += "\n\n**Input 2: Disease Trajectory Over Time**\n"
+        bucket_type = temporal_data.get('bucket_type', 'yearly')
+        time_labels = temporal_data.get('time_labels', [])
+        theta_sequence = temporal_data.get('theta_sequence', [])
+        
+        prompt += f"The patient's phenotype trajectory ({bucket_type} granularity):\n"
+        
+        # Show temporal evolution for top topics
+        for topic_idx in top_topic_indices[:3]:  # Show top 3 topics over time
+            topic_label = f"Topic {topic_idx}"
+            if topic_idx in inv_phecode_ids:
+                phecode = inv_phecode_ids[topic_idx]
+                if phecode in phecode_dict:
+                    topic_label = f"{phecode} ({phecode_dict[phecode][:30]}...)" if len(phecode_dict.get(phecode, '')) > 30 else f"{phecode} ({phecode_dict.get(phecode, '')})"
+            
+            prompt += f"\n  {topic_label}:"
+            trajectory_str = []
+            for t, (label, theta_t) in enumerate(zip(time_labels, theta_sequence)):
+                if torch.is_tensor(theta_t):
+                    theta_t = theta_t.cpu().numpy()
+                prob_t = theta_t[topic_idx] if len(theta_t) > topic_idx else 0
+                trajectory_str.append(f"{label}:{prob_t:.3f}")
+            prompt += " → ".join(trajectory_str)
+        
+        # Identify trends
+        prompt += "\n\nTrend Analysis:"
+        for topic_idx in top_topic_indices[:3]:
+            if len(theta_sequence) >= 2:
+                first_theta = theta_sequence[0]
+                last_theta = theta_sequence[-1]
+                if torch.is_tensor(first_theta):
+                    first_theta = first_theta.cpu().numpy()
+                if torch.is_tensor(last_theta):
+                    last_theta = last_theta.cpu().numpy()
+                
+                change = last_theta[topic_idx] - first_theta[topic_idx]
+                if change > 0.05:
+                    trend = "↑ INCREASING"
+                elif change < -0.05:
+                    trend = "↓ DECREASING"
+                else:
+                    trend = "→ STABLE"
+                
+                topic_name = inv_phecode_ids.get(topic_idx, f"Topic {topic_idx}")
+                prompt += f"\n  {topic_name}: {trend} (Δ={change:+.3f})"
+    
+    prompt += "\n\n**Input 3: Patient's Observed Medical Records**\n"
     
     for modality_name, codes in patient_records_by_modality.items():
         unique_codes = list(set(codes))
-        if len(unique_codes) > 20:
-            prompt += f"\n  {modality_name.upper()}: {', '.join(unique_codes[:20])} ... ({len(unique_codes)} total unique codes)"
+        if len(unique_codes) > 15:
+            prompt += f"\n  {modality_name.upper()}: {', '.join(unique_codes[:15])} ... ({len(unique_codes)} total)"
         else:
             prompt += f"\n  {modality_name.upper()}: {', '.join(unique_codes)}"
     
-    prompt += "\n\n**Input 3: Top Codes for Each Topic (φ)**\n"
-    prompt += f"These are the top {top_n_codes} most probable codes for each of the patient's dominant topics:\n"
+    prompt += "\n\n**Input 4: Top Codes for Dominant Phenotypes (Combined φ)**\n"
+    prompt += "Using φ_combined = π × φ^seed + (1-π) × φ^regular:\n"
     
     for topic_idx in top_topic_indices:
-        # Get PheCode label for this topic
         topic_label = f"Topic {topic_idx}"
         if topic_idx in inv_phecode_ids:
             phecode = inv_phecode_ids[topic_idx]
@@ -445,19 +527,61 @@ These represent the patient's probability distribution over latent phenotypes/di
             else:
                 topic_label = f"PheCode {phecode}"
         
-        prompt += f"\n  {topic_label} (probability {theta_np[topic_idx]:.4f}):"
+        prompt += f"\n  {topic_label} (θ={theta_np[topic_idx]:.4f}):"
         if topic_idx in topic_top_codes:
             for modality_name, codes_info in topic_top_codes[topic_idx].items():
-                prompt += f"\n    {modality_name.upper()}: {', '.join(codes_info)}"
+                prompt += f"\n    {modality_name.upper()}: {', '.join(codes_info[:7])}"
         else:
             prompt += "\n    (No significant codes)"
     
-    prompt += "\n\n**Question:**"
-    prompt += "\nBased on these three pieces of information, please explain:"
-    prompt += "\n1. What phenotypes or disease patterns do the top topics likely represent?"
-    prompt += "\n2. How well does the patient's actual medical history align with their inferred topic mixtures?"
-    prompt += "\n3. What insights can we draw about this patient's health condition and risk profile?"
-    prompt += "\n4. Are there any surprising findings or inconsistencies that warrant further investigation?"
+    # Add Markov risk predictions if available
+    if markov_risk is not None:
+        horizon = prediction_horizon or 1
+        prompt += f"\n\n**Input 5: Predicted Disease Risk ({horizon}-step ahead)**\n"
+        prompt += "Based on learned disease progression patterns (Markov model):\n"
+        
+        next_dist = markov_risk.get('next_state_distribution', None)
+        risk_data = markov_risk.get('risk', {})
+        
+        if next_dist is not None:
+            top_future = np.argsort(next_dist)[::-1][:5]
+            prompt += "\n  Most likely future phenotypes:"
+            for rank, topic_idx in enumerate(top_future, 1):
+                topic_label = inv_phecode_ids.get(topic_idx, f"Topic {topic_idx}")
+                if topic_label in phecode_dict:
+                    topic_label = f"{topic_label} ({phecode_dict[topic_label]})"
+                current_prob = theta_np[topic_idx] if topic_idx < len(theta_np) else 0
+                future_prob = next_dist[topic_idx]
+                change = future_prob - current_prob
+                prompt += f"\n    {rank}. {topic_label}: {future_prob:.3f} (Δ={change:+.3f} from current)"
+        
+        if risk_data:
+            prompt += f"\n\n  Risk Summary:"
+            prompt += f"\n    - Highest risk phenotype: Topic {risk_data.get('max_risk_topic', 'N/A')}"
+            prompt += f"\n    - Maximum risk probability: {risk_data.get('max_risk', 0):.4f}"
+            prompt += f"\n    - Prediction uncertainty (entropy): {risk_data.get('entropy', 0):.3f}"
+    
+    # Questions focused on future disease risk prediction
+    prompt += "\n\n**Questions for Analysis:**"
+    prompt += "\nBased on the above information, please provide:"
+    prompt += "\n"
+    prompt += "\n1. **Current Health Status**: What are the patient's dominant disease phenotypes and their clinical interpretation?"
+    prompt += "\n"
+    prompt += "\n2. **Future Disease Risk Prediction**: Based on the current phenotype profile"
+    if temporal_data is not None:
+        prompt += " and observed trajectory over time"
+    prompt += ", what diseases or complications is this patient most at risk of developing in the next 6-12 months? Consider:"
+    prompt += "\n   - Natural disease progression patterns"
+    prompt += "\n   - Comorbidity relationships"
+    prompt += "\n   - Medication-related risks"
+    prompt += "\n"
+    prompt += "\n3. **Risk Factors**: What specific risk factors in the patient's profile should clinicians monitor closely?"
+    prompt += "\n"
+    prompt += "\n4. **Preventive Recommendations**: What preventive measures or interventions could reduce the patient's future disease risk?"
+    
+    if temporal_data is not None:
+        prompt += "\n"
+        prompt += "\n5. **Temporal Pattern Insights**: How does the patient's disease trajectory inform the risk prediction? Are there concerning trends that suggest accelerated disease progression?"
     
     return prompt
 
@@ -600,6 +724,28 @@ Input Data Format:
         '--phi-csv-opcs',
         default=None,
         help='External phi CSV file for OPCS modality (e.g., UKB_phi_opcs.csv)'
+    )
+    parser.add_argument(
+        '--temporal-data',
+        default=None,
+        help='Path to temporal patient data file (CSV with SUBJECT_ID, code, timestamp, modality columns)'
+    )
+    parser.add_argument(
+        '--bucket-type',
+        choices=['yearly', 'monthly', 'quarterly', 'visit'],
+        default='yearly',
+        help='Time bucketing strategy for temporal data (default: yearly)'
+    )
+    parser.add_argument(
+        '--markov-model',
+        default=None,
+        help='Path to trained Markov transition model (.pkl) for risk prediction'
+    )
+    parser.add_argument(
+        '--prediction-horizon',
+        type=int,
+        default=1,
+        help='Prediction horizon for future disease risk (default: 1 time step)'
     )
     
     args = parser.parse_args()
@@ -784,6 +930,45 @@ Input Data Format:
         print(f"\nGenerating ChatGPT explanation prompts...")
         explanations = []
         
+        # Load temporal data if provided
+        temporal_corpus = None
+        theta_sequences = None
+        if args.temporal_data:
+            try:
+                from temporal_corpus import TemporalCorpus
+                print(f"Loading temporal data from {args.temporal_data}...")
+                temporal_corpus = TemporalCorpus.from_file(
+                    args.temporal_data,
+                    bucket_type=args.bucket_type
+                )
+                temporal_corpus.set_vocab_mappings(vocab_mappings, modality_list)
+                
+                # Compute theta sequences
+                theta_sequences = temporal_corpus.compute_theta_sequences(
+                    model,
+                    num_iterations=args.iterations,
+                    use_cumulative=True,
+                    method=args.method
+                )
+                print(f"Computed temporal theta for {len(theta_sequences)} patients")
+            except ImportError:
+                print("Warning: temporal_corpus module not found. Skipping temporal analysis.")
+            except Exception as e:
+                print(f"Warning: Could not load temporal data: {e}")
+        
+        # Load Markov model if provided
+        markov_model = None
+        if args.markov_model:
+            try:
+                from temporal_models import MarkovTransitionModel
+                print(f"Loading Markov model from {args.markov_model}...")
+                markov_model = MarkovTransitionModel.load(args.markov_model)
+                print(f"Loaded Markov model with {markov_model.K} topics")
+            except ImportError:
+                print("Warning: temporal_models module not found. Skipping Markov predictions.")
+            except Exception as e:
+                print(f"Warning: Could not load Markov model: {e}")
+        
         for _, row in results_df.iterrows():
             patient_id = row['patient_id']
             if patient_id not in patients_bow:
@@ -793,7 +978,43 @@ Input Data Format:
             theta_values = [row[col] for col in topic_cols]
             theta = np.array(theta_values)
             
-            # Generate prompt
+            # Prepare temporal data for this patient if available
+            temporal_data = None
+            if temporal_corpus is not None and patient_id in temporal_corpus.patients:
+                patient = temporal_corpus.patients[patient_id]
+                if patient_id in theta_sequences:
+                    theta_seq = theta_sequences[patient_id]
+                    time_labels = [str(bucket.time_index) for bucket in patient.buckets]
+                    
+                    # Convert to list of arrays
+                    if torch.is_tensor(theta_seq):
+                        theta_seq_list = [theta_seq[t] for t in range(theta_seq.shape[0])]
+                    else:
+                        theta_seq_list = [theta_seq[t] for t in range(len(theta_seq))]
+                    
+                    temporal_data = {
+                        'theta_sequence': theta_seq_list,
+                        'time_labels': time_labels,
+                        'bucket_type': args.bucket_type
+                    }
+            
+            # Prepare Markov risk predictions if available
+            markov_risk = None
+            if markov_model is not None:
+                try:
+                    next_dist = markov_model.predict_next_state(theta)
+                    risk = markov_model.predict_disease_risk(
+                        theta, 
+                        horizon=args.prediction_horizon
+                    )
+                    markov_risk = {
+                        'next_state_distribution': next_dist,
+                        'risk': risk
+                    }
+                except Exception as e:
+                    print(f"Warning: Could not compute Markov predictions for {patient_id}: {e}")
+            
+            # Generate prompt with temporal and prediction data
             prompt = generate_chatgpt_explanation_prompt(
                 patient_id=patient_id,
                 patient_bow=patients_bow[patient_id],
@@ -802,7 +1023,10 @@ Input Data Format:
                 vocab_mappings=vocab_mappings,
                 modality_list=modality_list,
                 top_k_topics=args.explain_top_topics,
-                top_n_codes=args.explain_top_codes
+                top_n_codes=args.explain_top_codes,
+                temporal_data=temporal_data,
+                markov_risk=markov_risk,
+                prediction_horizon=args.prediction_horizon
             )
             
             explanations.append({
