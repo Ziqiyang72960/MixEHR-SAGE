@@ -220,7 +220,13 @@ def train_markov_model(args):
         num_topics=K,
         discretization=args.discretization
     )
-    markov.fit(theta_sequences, smoothing=args.smoothing)
+    
+    # Get smoothing (None = adaptive)
+    smoothing = args.smoothing
+    
+    # Fit with top_k parameter
+    top_k = getattr(args, 'top_k', 5)
+    markov.fit(theta_sequences, smoothing=smoothing, top_k=top_k)
     
     # Save model
     markov.save(args.output)
@@ -231,12 +237,33 @@ def train_markov_model(args):
     print("=" * 50)
     print(f"Number of topics/states: {K}")
     print(f"Discretization method: {args.discretization}")
+    print(f"Smoothing: {markov.smoothing}")
     print(f"Number of patient sequences: {len(theta_sequences)}")
+    print(f"Total transitions counted: {markov.num_transitions}")
     
     stationary = markov.get_stationary_distribution()
     top_stationary = np.argsort(stationary)[::-1][:5]
     print(f"\nTop 5 stationary states: {top_stationary}")
     print(f"Stationary probabilities: {stationary[top_stationary]}")
+    
+    # Run diagnostics if requested
+    if getattr(args, 'diagnose', False):
+        print("\n" + "-" * 50)
+        print("DIAGNOSTIC RESULTS")
+        print("-" * 50)
+        diag = markov.diagnose()
+        print(f"Mean row variance: {diag['mean_row_variance']:.6f}")
+        print(f"Max row variance: {diag['max_row_variance']:.6f}")
+        print(f"Mean pairwise L1 distance: {diag['mean_pairwise_l1']:.4f}")
+        print(f"Stationary entropy: {diag['stationary_entropy']:.4f} (uniform={diag['uniform_entropy']:.4f})")
+        print(f"Raw counts sparsity: {diag['raw_counts_sparsity']:.4f}")
+        if 'mixing_time_approx' in diag:
+            print(f"Approximate mixing time: {diag['mixing_time_approx']:.1f} steps")
+        
+        if diag['recommendations']:
+            print("\nRECOMMENDATIONS:")
+            for rec in diag['recommendations']:
+                print(f"  {rec}")
     
     logger.info(f"Saved Markov model to {args.output}")
     
@@ -611,7 +638,8 @@ def predict_disease_risk(args):
         raise ValueError("Must provide --theta-sequences, --patient, or --theta")
     
     # Predict risk
-    risk = markov.predict_disease_risk(current_theta, horizon=args.horizon)
+    cumulative = getattr(args, 'cumulative', False)
+    risk = markov.predict_disease_risk(current_theta, horizon=args.horizon, cumulative=cumulative)
     next_state = markov.predict_next_state(current_theta)
     
     # Print results
@@ -620,6 +648,7 @@ def predict_disease_risk(args):
     print("=" * 50)
     print(f"Input: {patient_info}")
     print(f"Prediction horizon: {args.horizon} time steps")
+    print(f"Risk type: {'Cumulative (any time in horizon)' if cumulative else 'Exact step'}")
     print(f"\nCurrent top 3 topics: {np.argsort(current_theta)[::-1][:3]}")
     print(f"Current top 3 probabilities: {np.sort(current_theta)[::-1][:3]}")
     print(f"\nPredicted next state distribution:")
@@ -629,6 +658,8 @@ def predict_disease_risk(args):
     print(f"  Max risk topic: {risk['max_risk_topic']}")
     print(f"  Max risk probability: {risk['max_risk']:.4f}")
     print(f"  Entropy: {risk['entropy']:.4f}")
+    if 'kl_from_stationary' in risk:
+        print(f"  KL from stationary: {risk['kl_from_stationary']:.4f} (higher = more differentiated)")
     
     # Save to file if specified
     if args.output:
@@ -704,6 +735,113 @@ def predict_batch(markov, df, theta_cols, args):
         print("\nTip: Use --output to save results to CSV")
     
     return results_df
+
+
+def diagnose_markov_model(args):
+    """Run diagnostics on a trained Markov model."""
+    logger.info("Running Markov model diagnostics...")
+    
+    # Load model
+    markov = MarkovTransitionModel.load(args.model)
+    
+    print("\n" + "=" * 60)
+    print("MARKOV MODEL DIAGNOSTICS")
+    print("=" * 60)
+    print(f"Model: {args.model}")
+    print(f"K (num topics): {markov.K}")
+    print(f"Discretization: {markov.discretization}")
+    print(f"Smoothing used: {getattr(markov, 'smoothing', 'unknown')}")
+    print(f"Patients in training: {getattr(markov, 'num_patients', 'unknown')}")
+    print(f"Transitions counted: {getattr(markov, 'num_transitions', 'unknown')}")
+    
+    # Run diagnostics
+    print("\n" + "-" * 60)
+    print("TRANSITION MATRIX ANALYSIS")
+    print("-" * 60)
+    
+    diag = markov.diagnose()
+    print(f"Mean row variance: {diag['mean_row_variance']:.6e}")
+    print(f"Max row variance: {diag['max_row_variance']:.6e}")
+    print(f"Min row variance: {diag['min_row_variance']:.6e}")
+    print(f"Mean pairwise L1 distance: {diag['mean_pairwise_l1']:.4f}")
+    
+    print(f"\nStationary distribution entropy: {diag['stationary_entropy']:.4f}")
+    print(f"Uniform entropy (ln K): {diag['uniform_entropy']:.4f}")
+    entropy_ratio = diag['stationary_entropy'] / diag['uniform_entropy']
+    print(f"Entropy ratio: {entropy_ratio:.4f} (1.0 = uniform)")
+    
+    if 'spectral_gap' in diag:
+        print(f"\nSpectral gap: {diag['spectral_gap']:.6f}")
+        print(f"Approx mixing time: {diag.get('mixing_time_approx', 'N/A'):.1f} steps")
+    
+    print(f"\nRaw counts sparsity: {diag['raw_counts_sparsity']:.4f}")
+    
+    # Recommendations
+    if diag['recommendations']:
+        print("\n" + "-" * 60)
+        print("RECOMMENDATIONS")
+        print("-" * 60)
+        for rec in diag['recommendations']:
+            print(f"  {rec}")
+    
+    # Compare horizons if requested
+    if args.compare_horizons and args.theta_sequences:
+        print("\n" + "-" * 60)
+        print("HORIZON COMPARISON (h=1 vs h=6)")
+        print("-" * 60)
+        
+        df = pd.read_csv(args.theta_sequences)
+        theta_cols = [c for c in df.columns if c.startswith('theta_')]
+        
+        # Sample patients
+        patients = df['patient_id'].unique()
+        sample_patients = patients[:args.num_samples]
+        
+        for patient_id in sample_patients:
+            patient_df = df[df['patient_id'] == patient_id].sort_values('time_index')
+            current_theta = patient_df[theta_cols].values[-1]
+            
+            # Compare h=1 and h=6
+            risk_h1 = markov.predict_disease_risk(current_theta, horizon=1)
+            risk_h6 = markov.predict_disease_risk(current_theta, horizon=6)
+            
+            # Also get stationary distribution
+            stationary = markov.get_stationary_distribution()
+            
+            print(f"\nPatient {patient_id}:")
+            print(f"  Current top topic: {np.argmax(current_theta)}")
+            print(f"  h=1: max_risk_topic={risk_h1['max_risk_topic']}, prob={risk_h1['max_risk']:.4f}, entropy={risk_h1['entropy']:.4f}")
+            print(f"  h=6: max_risk_topic={risk_h6['max_risk_topic']}, prob={risk_h6['max_risk']:.4f}, entropy={risk_h6['entropy']:.4f}")
+            print(f"  Stationary: max_topic={np.argmax(stationary)}, max_prob={stationary.max():.4f}")
+            
+            # KL divergence from stationary
+            h1_dist = markov._compute_h_step_distribution(current_theta, 1)
+            h6_dist = markov._compute_h_step_distribution(current_theta, 6)
+            
+            kl_h1 = np.sum(h1_dist * np.log((h1_dist + 1e-10) / (stationary + 1e-10)))
+            kl_h6 = np.sum(h6_dist * np.log((h6_dist + 1e-10) / (stationary + 1e-10)))
+            print(f"  KL(h=1 || stationary): {kl_h1:.4f}")
+            print(f"  KL(h=6 || stationary): {kl_h6:.4f}")
+    
+    # Print suggestions
+    print("\n" + "=" * 60)
+    print("QUICK FIXES TO TRY")
+    print("=" * 60)
+    print("""
+1. Lower smoothing (most impactful for large K):
+   python run_temporal.py train_markov --theta ... --smoothing 1e-4 --diagnose
+
+2. Use dominant discretization instead of soft:
+   python run_temporal.py train_markov --theta ... --discretization dominant --diagnose
+
+3. Use horizon=1 for short-term predictions:
+   python run_temporal.py predict_risk --model ... --horizon 1
+
+4. Use cumulative risk instead of exact-step risk:
+   python run_temporal.py predict_risk --model ... --horizon 6 --cumulative
+""")
+    
+    return diag
 
 
 def run_demo(args):
@@ -914,11 +1052,15 @@ def main():
                               help='Path to theta sequences (CSV or pickle)')
     parser_markov.add_argument('--output', default='./results/markov_model.pkl',
                               help='Output path for model')
-    parser_markov.add_argument('--discretization', default='soft',
-                              choices=['dominant', 'soft', 'threshold'],
-                              help='State discretization method')
-    parser_markov.add_argument('--smoothing', type=float, default=1.0,
-                              help='Laplace smoothing parameter')
+    parser_markov.add_argument('--discretization', default='dominant',
+                              choices=['dominant', 'soft', 'top_k'],
+                              help='State discretization method (dominant recommended for large K)')
+    parser_markov.add_argument('--smoothing', type=float, default=None,
+                              help='Laplace smoothing parameter (default: adaptive based on K)')
+    parser_markov.add_argument('--top-k', type=int, default=5,
+                              help='Number of top topics for top_k discretization')
+    parser_markov.add_argument('--diagnose', action='store_true',
+                              help='Run diagnostic checks after training')
     
     # train_lstm command
     parser_lstm = subparsers.add_parser('train_lstm', parents=[common_parser],
@@ -1001,7 +1143,21 @@ def main():
     parser_risk.add_argument('--theta', help='Comma-separated theta values (direct input)')
     parser_risk.add_argument('--horizon', type=int, default=1,
                             help='Prediction horizon (time steps into future)')
+    parser_risk.add_argument('--cumulative', action='store_true',
+                            help='Use cumulative risk (any time in horizon) instead of exact step')
     parser_risk.add_argument('--output', help='Output path for predictions (JSON or CSV for batch)')
+    
+    # diagnose_markov command
+    parser_diag = subparsers.add_parser('diagnose_markov',
+                                        help='Run diagnostics on a trained Markov model')
+    parser_diag.add_argument('--model', required=True,
+                            help='Path to trained Markov model (.pkl)')
+    parser_diag.add_argument('--compare-horizons', action='store_true',
+                            help='Compare predictions at horizon=1 vs 6')
+    parser_diag.add_argument('--theta-sequences',
+                            help='Path to theta_sequences.csv for comparing predictions')
+    parser_diag.add_argument('--num-samples', type=int, default=5,
+                            help='Number of sample patients for comparison')
     
     # demo command
     parser_demo = subparsers.add_parser('demo',
@@ -1023,6 +1179,8 @@ def main():
         train_from_scratch(args)
     elif args.command == 'predict_risk':
         predict_disease_risk(args)
+    elif args.command == 'diagnose_markov':
+        diagnose_markov_model(args)
     elif args.command == 'demo':
         run_demo(args)
     else:

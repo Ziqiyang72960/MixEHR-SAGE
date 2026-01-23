@@ -40,6 +40,9 @@ class MarkovTransitionModel:
     - Soft assignment (uses full theta distribution)
     - Hard assignment (uses dominant topic)
     - Custom state clustering
+    
+    IMPORTANT: For large K (>100 topics), use discretization='dominant' and 
+    small smoothing (e.g., 1e-3 to 0.1) to avoid near-uniform distributions.
     """
     
     def __init__(self, num_topics: int, num_states: Optional[int] = None,
@@ -51,9 +54,9 @@ class MarkovTransitionModel:
             num_topics: Number of topics (K)
             num_states: Number of discrete states (default: num_topics)
             discretization: State assignment method
-                - 'dominant': Assign to dominant topic
-                - 'soft': Use soft counts from theta
-                - 'threshold': Assign to topics above threshold
+                - 'dominant': Assign to dominant topic (RECOMMENDED for large K)
+                - 'soft': Use soft counts from theta (can over-smooth)
+                - 'top_k': Use top-k topics with normalized weights
         """
         self.K = num_topics
         self.num_states = num_states or num_topics
@@ -67,23 +70,48 @@ class MarkovTransitionModel:
         # Statistics for estimation
         self.transition_counts = None
         self.state_counts = None
+        self.raw_transition_counts = None  # Before smoothing (for diagnostics)
+        
+        # Diagnostic statistics
+        self.num_transitions = 0
+        self.num_patients = 0
         
     def fit(self, theta_sequences: Dict[str, torch.Tensor],
-            smoothing: float = 1.0) -> 'MarkovTransitionModel':
+            smoothing: float = None,
+            top_k: int = 5) -> 'MarkovTransitionModel':
         """
         Estimate transition matrix from theta sequences.
         
         Args:
             theta_sequences: Dict mapping patient_id to theta sequence (T x K)
-            smoothing: Laplace smoothing parameter (default: 1.0)
+            smoothing: Laplace smoothing parameter. 
+                       Default: adaptive based on K (1e-3 for K>100, 0.1 for K<100)
+                       Set to 0 for no smoothing (may have zero rows)
+            top_k: For 'top_k' discretization, use top k topics
             
         Returns:
             self
         """
-        # Initialize counts with smoothing
-        self.transition_counts = np.zeros((self.num_states, self.num_states)) + smoothing
-        self.state_counts = np.zeros(self.num_states) + smoothing * self.num_states
-        initial_counts = np.zeros(self.num_states) + smoothing
+        # Adaptive smoothing based on K to avoid over-smoothing
+        if smoothing is None:
+            if self.K > 500:
+                smoothing = 1e-4  # Very small for very large K
+            elif self.K > 100:
+                smoothing = 1e-3  # Small for large K
+            else:
+                smoothing = 0.1   # Moderate for small K
+            logger.info(f"Using adaptive smoothing={smoothing} for K={self.K}")
+        
+        self.smoothing = smoothing
+        self.top_k = top_k
+        
+        # Initialize raw counts (no smoothing)
+        self.raw_transition_counts = np.zeros((self.num_states, self.num_states))
+        raw_state_counts = np.zeros(self.num_states)
+        raw_initial_counts = np.zeros(self.num_states)
+        
+        self.num_transitions = 0
+        self.num_patients = 0
         
         for patient_id, theta_seq in theta_sequences.items():
             # Convert to numpy
@@ -94,31 +122,91 @@ class MarkovTransitionModel:
             if T < 1:
                 continue
             
+            self.num_patients += 1
+            
             # Get state assignments for each time step
             states = self._discretize_theta_sequence(theta_seq)
             
             # Count initial state
-            initial_counts[states[0]] += 1
+            if self.discretization == 'soft':
+                raw_initial_counts += theta_seq[0]
+            elif self.discretization == 'top_k':
+                top_indices = np.argsort(theta_seq[0])[-top_k:]
+                top_weights = theta_seq[0][top_indices]
+                top_weights = top_weights / (top_weights.sum() + mini_val)
+                raw_initial_counts[top_indices] += top_weights
+            else:
+                raw_initial_counts[states[0]] += 1
             
             # Count transitions
             for t in range(T - 1):
                 s_prev = states[t]
                 s_curr = states[t + 1]
+                self.num_transitions += 1
                 
                 if self.discretization == 'soft':
                     # Soft counts using outer product
-                    self.transition_counts += np.outer(theta_seq[t], theta_seq[t + 1])
-                    self.state_counts += theta_seq[t]
+                    self.raw_transition_counts += np.outer(theta_seq[t], theta_seq[t + 1])
+                    raw_state_counts += theta_seq[t]
+                elif self.discretization == 'top_k':
+                    # Use top-k topics with normalized weights
+                    top_prev = np.argsort(theta_seq[t])[-top_k:]
+                    top_curr = np.argsort(theta_seq[t + 1])[-top_k:]
+                    w_prev = theta_seq[t][top_prev]
+                    w_prev = w_prev / (w_prev.sum() + mini_val)
+                    w_curr = theta_seq[t + 1][top_curr]
+                    w_curr = w_curr / (w_curr.sum() + mini_val)
+                    for i, sp in enumerate(top_prev):
+                        for j, sc in enumerate(top_curr):
+                            self.raw_transition_counts[sp, sc] += w_prev[i] * w_curr[j]
+                        raw_state_counts[sp] += w_prev[i]
                 else:
-                    # Hard counts
-                    self.transition_counts[s_prev, s_curr] += 1
-                    self.state_counts[s_prev] += 1
+                    # Hard counts (dominant)
+                    self.raw_transition_counts[s_prev, s_curr] += 1
+                    raw_state_counts[s_prev] += 1
+        
+        # Add smoothing
+        self.transition_counts = self.raw_transition_counts + smoothing
+        self.state_counts = raw_state_counts + smoothing * self.num_states
+        initial_counts = raw_initial_counts + smoothing
         
         # Normalize to get probabilities
-        self.transition_matrix = self.transition_counts / self.state_counts[:, np.newaxis]
-        self.initial_distribution = initial_counts / initial_counts.sum()
+        # Avoid division by zero
+        denom = self.state_counts[:, np.newaxis]
+        denom = np.where(denom > 0, denom, 1.0)
+        self.transition_matrix = self.transition_counts / denom
+        
+        # Normalize rows to sum to 1
+        row_sums = self.transition_matrix.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums > 0, row_sums, 1.0)
+        self.transition_matrix = self.transition_matrix / row_sums
+        
+        self.initial_distribution = initial_counts / (initial_counts.sum() + mini_val)
+        
+        # Log diagnostic info
+        self._log_diagnostics()
         
         return self
+    
+    def _log_diagnostics(self):
+        """Log diagnostic statistics about the fitted model."""
+        logger.info(f"Markov model fitted: {self.num_patients} patients, {self.num_transitions} transitions")
+        
+        # Check row variance (should be high for informative model)
+        row_variances = np.var(self.transition_matrix, axis=1)
+        mean_row_var = np.mean(row_variances)
+        max_row_var = np.max(row_variances)
+        
+        # Check sparsity of raw counts
+        nonzero_raw = np.sum(self.raw_transition_counts > 0)
+        sparsity = nonzero_raw / (self.num_states ** 2)
+        
+        logger.info(f"  Transition matrix: mean row variance={mean_row_var:.6f}, max={max_row_var:.6f}")
+        logger.info(f"  Raw counts sparsity: {sparsity:.4f} ({nonzero_raw}/{self.num_states**2} non-zero)")
+        
+        if mean_row_var < 1e-5:
+            logger.warning("  WARNING: Very low row variance - predictions may be near-uniform!")
+            logger.warning("  Consider: 1) lower smoothing, 2) use 'dominant' discretization, 3) more data")
     
     def _discretize_theta_sequence(self, theta_seq: np.ndarray) -> np.ndarray:
         """
@@ -133,13 +221,12 @@ class MarkovTransitionModel:
         T = theta_seq.shape[0]
         states = np.zeros(T, dtype=int)
         
-        if self.discretization == 'dominant':
+        if self.discretization in ['dominant', 'top_k']:
             # Assign to dominant (highest probability) topic
             states = theta_seq.argmax(axis=1)
             
-        elif self.discretization == 'threshold':
-            # This would require clustering logic
-            # For now, use dominant
+        elif self.discretization == 'soft':
+            # For soft, still need discrete states for some operations
             states = theta_seq.argmax(axis=1)
         
         return states
@@ -166,7 +253,17 @@ class MarkovTransitionModel:
         if self.discretization == 'soft':
             # Weighted combination of transition rows
             next_dist = current_theta @ self.transition_matrix
+        elif self.discretization == 'top_k':
+            # Use top-k weighted combination
+            top_k = getattr(self, 'top_k', 5)
+            top_indices = np.argsort(current_theta)[-top_k:]
+            weights = current_theta[top_indices]
+            weights = weights / (weights.sum() + mini_val)
+            next_dist = np.zeros(self.num_states)
+            for i, idx in enumerate(top_indices):
+                next_dist += weights[i] * self.transition_matrix[idx]
         else:
+            # Dominant topic
             current_state = current_theta.argmax()
             next_dist = self.transition_matrix[current_state]
         
@@ -176,7 +273,8 @@ class MarkovTransitionModel:
     
     def predict_disease_risk(self, current_theta: Union[np.ndarray, torch.Tensor],
                            horizon: int = 1,
-                           target_topics: Optional[List[int]] = None) -> Dict[str, float]:
+                           target_topics: Optional[List[int]] = None,
+                           cumulative: bool = False) -> Dict[str, float]:
         """
         Estimate disease risk over a future horizon.
         
@@ -185,6 +283,9 @@ class MarkovTransitionModel:
             horizon: Number of time steps to predict ahead
             target_topics: List of topic indices representing target diseases
                           If None, returns risk for all topics
+            cumulative: If True, return cumulative risk over 1..horizon steps
+                       (probability of reaching state at ANY time in horizon)
+                       If False, return risk at exactly step h (default)
             
         Returns:
             Dict with risk estimates for each topic
@@ -195,29 +296,64 @@ class MarkovTransitionModel:
         if torch.is_tensor(current_theta):
             current_theta = current_theta.cpu().numpy()
         
-        # Compute n-step transition
-        transition_n = np.linalg.matrix_power(self.transition_matrix, horizon)
-        
-        if self.discretization == 'soft':
-            future_dist = current_theta @ transition_n
+        if cumulative:
+            # Cumulative risk: probability of visiting state in ANY of steps 1..horizon
+            # Approximation: max probability over all steps (upper bound)
+            cumulative_risk = np.zeros(self.num_states)
+            
+            for h in range(1, horizon + 1):
+                step_dist = self._compute_h_step_distribution(current_theta, h)
+                cumulative_risk = np.maximum(cumulative_risk, step_dist)
+            
+            future_dist = cumulative_risk
         else:
-            current_state = current_theta.argmax()
-            future_dist = transition_n[current_state]
+            # Risk at exactly step h
+            future_dist = self._compute_h_step_distribution(current_theta, horizon)
         
         # Compute risks
         if target_topics is None:
-            target_topics = list(range(self.K))
+            target_topics = list(range(min(10, self.K)))  # Top 10 by default
         
         risks = {}
         for topic_idx in target_topics:
-            risks[f'topic_{topic_idx}'] = float(future_dist[topic_idx])
+            if topic_idx < self.num_states:
+                risks[f'topic_{topic_idx}'] = float(future_dist[topic_idx])
         
         # Add summary statistics
         risks['max_risk_topic'] = int(future_dist.argmax())
         risks['max_risk'] = float(future_dist.max())
         risks['entropy'] = float(-np.sum(future_dist * np.log(future_dist + mini_val)))
         
+        # Add comparison with stationary distribution
+        stationary = self.get_stationary_distribution()
+        kl_from_stationary = np.sum(future_dist * np.log((future_dist + mini_val) / (stationary + mini_val)))
+        risks['kl_from_stationary'] = float(kl_from_stationary)
+        
         return risks
+    
+    def _compute_h_step_distribution(self, current_theta: np.ndarray, h: int) -> np.ndarray:
+        """Compute h-step ahead distribution."""
+        if h == 0:
+            return current_theta
+        
+        # Compute n-step transition
+        transition_n = np.linalg.matrix_power(self.transition_matrix, h)
+        
+        if self.discretization == 'soft':
+            future_dist = current_theta @ transition_n
+        elif self.discretization == 'top_k':
+            top_k = getattr(self, 'top_k', 5)
+            top_indices = np.argsort(current_theta)[-top_k:]
+            weights = current_theta[top_indices]
+            weights = weights / (weights.sum() + mini_val)
+            future_dist = np.zeros(self.num_states)
+            for i, idx in enumerate(top_indices):
+                future_dist += weights[i] * transition_n[idx]
+        else:
+            current_state = current_theta.argmax()
+            future_dist = transition_n[current_state]
+        
+        return future_dist
     
     def get_stationary_distribution(self) -> np.ndarray:
         """
@@ -237,9 +373,81 @@ class MarkovTransitionModel:
         stationary = np.real(eigenvectors[:, idx])
         
         # Normalize
-        stationary = stationary / stationary.sum()
+        stationary = np.abs(stationary)  # Ensure positive
+        stationary = stationary / (stationary.sum() + mini_val)
         
         return stationary
+    
+    def diagnose(self) -> Dict[str, any]:
+        """
+        Run diagnostic checks on the fitted model.
+        
+        Returns:
+            Dict with diagnostic results and recommendations
+        """
+        if self.transition_matrix is None:
+            return {'error': 'Model not fitted'}
+        
+        results = {}
+        
+        # 1. Row variance analysis
+        row_variances = np.var(self.transition_matrix, axis=1)
+        results['mean_row_variance'] = float(np.mean(row_variances))
+        results['max_row_variance'] = float(np.max(row_variances))
+        results['min_row_variance'] = float(np.min(row_variances))
+        
+        # 2. L1 distance between rows (measure of differentiation)
+        n_sample = min(100, self.num_states)
+        sample_indices = np.random.choice(self.num_states, n_sample, replace=False)
+        l1_distances = []
+        for i in range(n_sample):
+            for j in range(i + 1, n_sample):
+                l1 = np.sum(np.abs(self.transition_matrix[sample_indices[i]] - 
+                                   self.transition_matrix[sample_indices[j]]))
+                l1_distances.append(l1)
+        results['mean_pairwise_l1'] = float(np.mean(l1_distances))
+        
+        # 3. Stationary distribution analysis
+        stationary = self.get_stationary_distribution()
+        results['stationary_entropy'] = float(-np.sum(stationary * np.log(stationary + mini_val)))
+        results['stationary_max'] = float(stationary.max())
+        results['uniform_entropy'] = float(np.log(self.num_states))
+        
+        # 4. Mixing time estimate (how fast converges to stationary)
+        # Using spectral gap: 1 - |second eigenvalue|
+        eigenvalues = np.linalg.eigvals(self.transition_matrix)
+        eigenvalues_sorted = np.sort(np.abs(eigenvalues))[::-1]
+        if len(eigenvalues_sorted) > 1:
+            spectral_gap = 1 - eigenvalues_sorted[1]
+            results['spectral_gap'] = float(spectral_gap)
+            if spectral_gap > 0:
+                results['mixing_time_approx'] = float(1 / spectral_gap)
+        
+        # 5. Sparsity of raw counts
+        nonzero = np.sum(self.raw_transition_counts > 0) if self.raw_transition_counts is not None else 0
+        results['raw_counts_sparsity'] = float(nonzero / (self.num_states ** 2))
+        results['num_transitions'] = self.num_transitions
+        results['num_patients'] = self.num_patients
+        
+        # 6. Recommendations
+        recommendations = []
+        
+        if results['mean_row_variance'] < 1e-5:
+            recommendations.append("Very low row variance - transition matrix is near-uniform")
+            recommendations.append("  -> Try: smoothing=1e-4 or lower")
+            recommendations.append("  -> Try: discretization='dominant' instead of 'soft'")
+        
+        if results.get('mixing_time_approx', 0) < 2:
+            recommendations.append(f"Fast mixing (time ~{results.get('mixing_time_approx', 0):.1f}) - horizon>1 may give near-stationary")
+            recommendations.append("  -> Use horizon=1 for meaningful short-term predictions")
+        
+        if results['raw_counts_sparsity'] < 0.01:
+            recommendations.append(f"Very sparse transitions ({results['raw_counts_sparsity']:.4f}) - many states never visited")
+            recommendations.append("  -> Consider clustering topics or using top_k discretization")
+        
+        results['recommendations'] = recommendations
+        
+        return results
     
     def save(self, path: str):
         """Save model to file."""
@@ -250,7 +458,12 @@ class MarkovTransitionModel:
             'transition_matrix': self.transition_matrix,
             'initial_distribution': self.initial_distribution,
             'transition_counts': self.transition_counts,
-            'state_counts': self.state_counts
+            'state_counts': self.state_counts,
+            'raw_transition_counts': self.raw_transition_counts,
+            'num_transitions': self.num_transitions,
+            'num_patients': self.num_patients,
+            'smoothing': getattr(self, 'smoothing', 1.0),
+            'top_k': getattr(self, 'top_k', 5),
         }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
@@ -271,6 +484,11 @@ class MarkovTransitionModel:
         model.initial_distribution = data['initial_distribution']
         model.transition_counts = data['transition_counts']
         model.state_counts = data['state_counts']
+        model.raw_transition_counts = data.get('raw_transition_counts')
+        model.num_transitions = data.get('num_transitions', 0)
+        model.num_patients = data.get('num_patients', 0)
+        model.smoothing = data.get('smoothing', 1.0)
+        model.top_k = data.get('top_k', 5)
         
         return model
 
