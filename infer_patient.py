@@ -265,7 +265,8 @@ def convert_modality_files_to_bow(modality_files, vocab_mappings, modality_list,
 
 
 def infer_from_modality_files(model, modality_files, vocab_mappings, modality_list,
-                               word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs'):
+                               word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs',
+                               patient_sex=None, sex_specific_info=None):
     """
     Infer theta for patients from separate modality files.
     
@@ -279,6 +280,8 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
         return_bow: if True, also return patients_bow dict
         external_phi: optional list of external phi distributions from CSV files
         method: inference method - 'gibbs' (default) or 'variational'
+        patient_sex: 'male' or 'female' for sex-specific filtering (optional)
+        sex_specific_info: dict from load_sex_specific_phecodes() for filtering (optional)
     
     Returns:
         DataFrame with patient_id and theta values
@@ -318,8 +321,12 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
             theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
         else:
             theta = model.infer_theta_fast(bow, num_iterations=num_iterations, method=method)
+        
+        # Apply sex-specific filtering if requested
+        if patient_sex and sex_specific_info:
+            theta = apply_sex_filter_to_theta(theta, patient_sex, sex_specific_info, normalize=True)
             
-        theta_np = theta.cpu().numpy()
+        theta_np = theta.cpu().numpy() if torch.is_tensor(theta) else np.array(theta)
         result = {'patient_id': patient_id}
         for k in range(len(theta_np)):
             result[f'topic_{k}'] = theta_np[k]
@@ -331,7 +338,8 @@ def infer_from_modality_files(model, modality_files, vocab_mappings, modality_li
 
 
 def infer_from_file(model, patient_file, vocab_mappings, modality_list, 
-                    word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs'):
+                    word_column='code', num_iterations=10, return_bow=False, external_phi=None, method='gibbs',
+                    patient_sex=None, sex_specific_info=None):
     """
     Infer theta for patients from a data file.
     
@@ -345,6 +353,8 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
         return_bow: if True, also return patients_bow dict
         external_phi: optional list of external phi distributions from CSV files
         method: inference method - 'gibbs' (default) or 'variational'
+        patient_sex: 'male' or 'female' for sex-specific filtering (optional)
+        sex_specific_info: dict from load_sex_specific_phecodes() for filtering (optional)
     
     Returns:
         DataFrame with patient_id and theta values
@@ -369,8 +379,12 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
             theta = model.infer_theta_with_external_phi(patient_data, external_phi, num_iterations=num_iterations)
         else:
             theta = model.infer_theta_fast(bow, num_iterations=num_iterations, method=method)
+        
+        # Apply sex-specific filtering if requested
+        if patient_sex and sex_specific_info:
+            theta = apply_sex_filter_to_theta(theta, patient_sex, sex_specific_info, normalize=True)
             
-        theta_np = theta.cpu().numpy()
+        theta_np = theta.cpu().numpy() if torch.is_tensor(theta) else np.array(theta)
         result = {'patient_id': patient_id}
         for k in range(len(theta_np)):
             result[f'topic_{k}'] = theta_np[k]
@@ -383,7 +397,8 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
 
 def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
                            cutoff_date=None, bucket_type='yearly', num_iterations=10,
-                           method='variational', forecast_horizon=0, forecast_smoothing=0.9):
+                           method='variational', forecast_horizon=0, forecast_smoothing=0.9,
+                           patient_sex=None, sex_specific_info=None):
     """
     Temporal inference for new patients using trained model parameters.
     
@@ -405,6 +420,8 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
         method: inference method ('variational' or 'gibbs')
         forecast_horizon: number of future time steps to forecast (0 = no forecast)
         forecast_smoothing: smoothing factor for theta extrapolation (0-1, higher=more persistence)
+        patient_sex: 'male' or 'female' for sex-specific filtering (optional)
+        sex_specific_info: dict from load_sex_specific_phecodes() for filtering (optional)
         
     Returns:
         dict: {
@@ -561,6 +578,23 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
         theta_current = theta_sequence[-1] if theta_sequence else torch.ones(model.K, dtype=torch.double, device=device) / model.K
         theta_current_np = theta_current.cpu().numpy()
         
+        # Apply sex-specific filtering if requested
+        if patient_sex and sex_specific_info:
+            # Filter theta_current
+            theta_current_np = apply_sex_filter_to_theta(
+                theta_current_np, patient_sex, sex_specific_info, normalize=True
+            )
+            
+            # Filter theta_sequence
+            filtered_sequence = []
+            for theta_t in theta_sequence:
+                theta_t_np = theta_t.cpu().numpy()
+                filtered_t = apply_sex_filter_to_theta(
+                    theta_t_np, patient_sex, sex_specific_info, normalize=True
+                )
+                filtered_sequence.append(torch.tensor(filtered_t, dtype=torch.double, device=device))
+            theta_sequence = filtered_sequence
+        
         # Get top topics
         top_k = 10
         top_topic_indices = np.argsort(theta_current_np)[::-1][:top_k]
@@ -593,7 +627,8 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
             current_theta = theta_current_np.copy()
             
             # Compute trend from recent history
-            prev_theta = theta_sequence[-2].cpu().numpy()
+            prev_theta_t = theta_sequence[-2]
+            prev_theta = prev_theta_t.cpu().numpy() if torch.is_tensor(prev_theta_t) else np.array(prev_theta_t)
             trend = current_theta - prev_theta
             
             last_time = time_labels[-1] if time_labels else 0
@@ -607,6 +642,12 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
                 forecast_theta = np.maximum(forecast_theta, 1e-10)
                 forecast_theta = forecast_theta / forecast_theta.sum()
                 
+                # Apply sex-specific filtering to forecast if requested
+                if patient_sex and sex_specific_info:
+                    forecast_theta = apply_sex_filter_to_theta(
+                        forecast_theta, patient_sex, sex_specific_info, normalize=True
+                    )
+                
                 forecast.append(forecast_theta)
                 
                 # Generate forecast time label (same logic for all bucket types)
@@ -615,7 +656,7 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
         # Compile results for this patient
         result = {
             'patient_id': patient_id,
-            'theta_sequence': [t.cpu().numpy() for t in theta_sequence],
+            'theta_sequence': [t.cpu().numpy() if torch.is_tensor(t) else np.array(t) for t in theta_sequence],
             'time_labels': time_labels,
             'theta_current': theta_current_np,
             'top_topics': top_topics,
@@ -776,6 +817,120 @@ def load_phecode_ids_mapping(phecode_ids_path='./mapping/phecode_ids.pkl'):
     except Exception as e:
         print(f"Warning: Could not load PheCode IDs from {phecode_ids_path}: {e}")
         return {}
+
+
+def load_sex_specific_phecodes(phecode_def_path='./mapping/phecode_definitions1.2.csv',
+                               phecode_ids_path='./mapping/phecode_ids.pkl'):
+    """
+    Load sex-specific phecode mappings to identify which topics are sex-specific.
+    
+    Returns:
+        dict: {
+            'male_only_topics': set of topic indices for male-only phecodes,
+            'female_only_topics': set of topic indices for female-only phecodes,
+            'male_only_phecodes': set of phecode strings that are male-only,
+            'female_only_phecodes': set of phecode strings that are female-only
+        }
+    """
+    male_only_topics = set()
+    female_only_topics = set()
+    male_only_phecodes = set()
+    female_only_phecodes = set()
+    
+    try:
+        # Load phecode definitions with sex information
+        phecode_df = pd.read_csv(phecode_def_path)
+        
+        # Get sex-specific phecodes
+        for _, row in phecode_df.iterrows():
+            phecode = str(row['phecode'])
+            sex = str(row['sex']).strip() if pd.notna(row['sex']) else ''
+            
+            if sex == 'Male':
+                male_only_phecodes.add(phecode)
+            elif sex == 'Female':
+                female_only_phecodes.add(phecode)
+        
+        # Load phecode to topic index mapping
+        with open(phecode_ids_path, 'rb') as f:
+            phecode_ids = pickle.load(f)
+        
+        # Map phecodes to topic indices
+        if isinstance(phecode_ids, dict):
+            for phecode, topic_idx in phecode_ids.items():
+                phecode_str = str(phecode)
+                if phecode_str in male_only_phecodes:
+                    male_only_topics.add(topic_idx)
+                elif phecode_str in female_only_phecodes:
+                    female_only_topics.add(topic_idx)
+        
+        print(f"Loaded sex-specific phecodes: {len(male_only_phecodes)} male-only, {len(female_only_phecodes)} female-only")
+        print(f"Mapped to topics: {len(male_only_topics)} male-only topics, {len(female_only_topics)} female-only topics")
+        
+    except Exception as e:
+        print(f"Warning: Could not load sex-specific phecode mappings: {e}")
+    
+    return {
+        'male_only_topics': male_only_topics,
+        'female_only_topics': female_only_topics,
+        'male_only_phecodes': male_only_phecodes,
+        'female_only_phecodes': female_only_phecodes
+    }
+
+
+def apply_sex_filter_to_theta(theta, patient_sex, sex_specific_info, normalize=True):
+    """
+    Apply sex-specific filtering to theta (topic mixture) by zeroing out
+    topics that are inappropriate for the patient's sex.
+    
+    Args:
+        theta: Topic mixture tensor or numpy array (K-dimensional)
+        patient_sex: 'male' or 'female'
+        sex_specific_info: dict from load_sex_specific_phecodes()
+        normalize: If True, renormalize theta after filtering (default: True)
+    
+    Returns:
+        Filtered theta (same type as input)
+    """
+    if patient_sex is None:
+        return theta
+    
+    patient_sex = patient_sex.lower().strip()
+    if patient_sex not in ['male', 'female']:
+        print(f"Warning: Invalid patient_sex '{patient_sex}'. Expected 'male' or 'female'. No filtering applied.")
+        return theta
+    
+    # Determine which topics to zero out
+    if patient_sex == 'male':
+        # Zero out female-only topics for male patients
+        topics_to_zero = sex_specific_info.get('female_only_topics', set())
+    else:
+        # Zero out male-only topics for female patients
+        topics_to_zero = sex_specific_info.get('male_only_topics', set())
+    
+    if not topics_to_zero:
+        return theta
+    
+    # Convert to numpy for manipulation
+    is_tensor = torch.is_tensor(theta)
+    if is_tensor:
+        theta_np = theta.cpu().numpy().copy()
+    else:
+        theta_np = np.array(theta).copy()
+    
+    # Zero out inappropriate topics
+    for topic_idx in topics_to_zero:
+        if topic_idx < len(theta_np):
+            theta_np[topic_idx] = 0.0
+    
+    # Renormalize if requested
+    if normalize and theta_np.sum() > 0:
+        theta_np = theta_np / theta_np.sum()
+    
+    # Convert back to original type
+    if is_tensor:
+        return torch.tensor(theta_np, dtype=theta.dtype, device=theta.device)
+    return theta_np
 
 
 def generate_chatgpt_explanation_prompt(patient_id, patient_bow, theta, model, vocab_mappings, 
@@ -1241,6 +1396,12 @@ Input Data Format:
         default=0.9,
         help='Smoothing factor for theta extrapolation (0-1, higher=more persistence, default: 0.9)'
     )
+    parser.add_argument(
+        '--patient-sex',
+        choices=['male', 'female'],
+        default=None,
+        help='Patient biological sex for sex-specific phecode filtering. When specified, topics corresponding to phecodes of the opposite sex will be filtered out (e.g., male patients will not have female-specific disease topics like cervical cancer).'
+    )
     
     args = parser.parse_args()
     
@@ -1283,6 +1444,19 @@ Input Data Format:
     # Load vocabulary mappings
     vocab_mappings = load_vocab_mappings(args.mapping)
     print(f"Loaded vocabulary mappings for: {list(vocab_mappings.keys())}")
+    
+    # Load sex-specific phecode information if patient sex filtering is requested
+    sex_specific_info = None
+    if args.patient_sex:
+        print(f"\nPatient sex specified: {args.patient_sex}")
+        sex_specific_info = load_sex_specific_phecodes(
+            phecode_def_path=os.path.join(args.mapping, 'phecode_definitions1.2.csv'),
+            phecode_ids_path=os.path.join(args.mapping, 'phecode_ids.pkl')
+        )
+        if args.patient_sex == 'male':
+            print(f"  Will filter out {len(sex_specific_info.get('female_only_topics', set()))} female-specific topics")
+        else:
+            print(f"  Will filter out {len(sex_specific_info.get('male_only_topics', set()))} male-specific topics")
     
     # Check if external phi CSVs are provided
     external_phi = None
@@ -1394,6 +1568,61 @@ Input Data Format:
             theta_rows.append(row)
         
         results_df = pd.DataFrame(theta_rows)
+        
+        # Apply sex-specific filtering for temporal inference if requested
+        if args.patient_sex and sex_specific_info:
+            print(f"\nApplying sex-specific filtering for {args.patient_sex} patient(s)...")
+            topic_cols = [c for c in results_df.columns if c.startswith('topic_')]
+            
+            for idx, row in results_df.iterrows():
+                # Extract theta values as array
+                theta_values = np.array([row[col] for col in topic_cols])
+                
+                # Apply sex filter
+                filtered_theta = apply_sex_filter_to_theta(
+                    theta_values, args.patient_sex, sex_specific_info, normalize=True
+                )
+                
+                # Update the row with filtered values
+                for i, col in enumerate(topic_cols):
+                    results_df.at[idx, col] = filtered_theta[i]
+            
+            # Also filter the theta sequences in temporal_results
+            for result in temporal_results:
+                # Filter current theta
+                result['theta_current'] = apply_sex_filter_to_theta(
+                    np.array(result['theta_current']), args.patient_sex, sex_specific_info, normalize=True
+                )
+                
+                # Filter theta sequence
+                filtered_sequence = []
+                for theta_t in result['theta_sequence']:
+                    filtered_theta_t = apply_sex_filter_to_theta(
+                        np.array(theta_t), args.patient_sex, sex_specific_info, normalize=True
+                    )
+                    filtered_sequence.append(filtered_theta_t)
+                result['theta_sequence'] = filtered_sequence
+                
+                # Filter forecast if present
+                if result.get('forecast'):
+                    filtered_forecast = []
+                    for f_theta in result['forecast']:
+                        filtered_f = apply_sex_filter_to_theta(
+                            np.array(f_theta), args.patient_sex, sex_specific_info, normalize=True
+                        )
+                        filtered_forecast.append(filtered_f)
+                    result['forecast'] = filtered_forecast
+                
+                # Update top_topics with filtered theta
+                filtered_current = result['theta_current']
+                top_indices = np.argsort(filtered_current)[::-1][:5]
+                result['top_topics'] = [(int(idx), float(filtered_current[idx]), f"topic_{idx}") for idx in top_indices]
+            
+            if args.patient_sex == 'male':
+                filtered_count = len(sex_specific_info.get('female_only_topics', set()))
+            else:
+                filtered_count = len(sex_specific_info.get('male_only_topics', set()))
+            print(f"  Filtered {filtered_count} sex-inappropriate topics and renormalized theta distributions")
         
         # Save theta sequences if forecast was requested
         if args.forecast_horizon > 0:
@@ -1558,6 +1787,31 @@ Input Data Format:
     else:
         print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
         sys.exit(1)
+    
+    # Apply sex-specific filtering if requested
+    if args.patient_sex and sex_specific_info:
+        print(f"\nApplying sex-specific filtering for {args.patient_sex} patient(s)...")
+        topic_cols = [c for c in results_df.columns if c.startswith('topic_')]
+        
+        for idx, row in results_df.iterrows():
+            # Extract theta values as array
+            theta_values = np.array([row[col] for col in topic_cols])
+            
+            # Apply sex filter
+            filtered_theta = apply_sex_filter_to_theta(
+                theta_values, args.patient_sex, sex_specific_info, normalize=True
+            )
+            
+            # Update the row with filtered values
+            for i, col in enumerate(topic_cols):
+                results_df.at[idx, col] = filtered_theta[i]
+        
+        # Count filtered topics
+        if args.patient_sex == 'male':
+            filtered_count = len(sex_specific_info.get('female_only_topics', set()))
+        else:
+            filtered_count = len(sex_specific_info.get('male_only_topics', set()))
+        print(f"  Filtered {filtered_count} sex-inappropriate topics and renormalized theta distributions")
     
     # Filter to top-k if specified
     if args.top_k is not None:
