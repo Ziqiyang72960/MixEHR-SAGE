@@ -31,9 +31,9 @@ The temporal analysis module extends MixEHR-SAGE to support longitudinal patient
 
 ## Input Data Format
 
-### Temporal Data CSV
+### Temporal Data CSV (Single File)
 
-The temporal data file should contain the following columns:
+For a single file containing all modalities, use the following format:
 
 | Column | Description | Example |
 |--------|-------------|---------|
@@ -52,6 +52,32 @@ patient_001,E11.9,2016-01-10,icd
 patient_002,J44.1,2014-05-10,icd
 patient_002,C09AA02,0,med
 ```
+
+### Temporal Data (Separate Modality Files)
+
+When using `--temporal-icd`, `--temporal-med`, or `--temporal-opcs`, each file should have:
+
+| Column | Description | Example |
+|--------|-------------|---------|
+| `SUBJECT_ID` | Patient identifier | `patient_001` |
+| `code` | Medical code | `E11.9` |
+| `timestamp` | Date or visit index (**REQUIRED**) | `2015-03-15` |
+
+**⚠️ IMPORTANT:** The `timestamp` column is REQUIRED for temporal inference. Regular data files without timestamps (like `synthetic_icd.csv`) cannot be used for temporal analysis.
+
+**Example for `--temporal-icd`:**
+```csv
+SUBJECT_ID,code,timestamp
+patient_001,E11.9,2015-03-15
+patient_001,I10,2015-06-20
+patient_001,E11.9,2016-01-10
+patient_002,J44.1,2014-05-10
+```
+
+**Accepted column name variations:**
+- Patient ID: `SUBJECT_ID`, `patient_id`, `eid`, `id`
+- Code: `code`, `PheCode`, `ICD`, `diagnosis`
+- Timestamp: `timestamp`, `date`, `event_date`, `diag_date`, `visit_date`
 
 ### Timestamp Formats
 

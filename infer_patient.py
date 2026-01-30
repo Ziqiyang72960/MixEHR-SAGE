@@ -429,16 +429,68 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
             if df is None or len(df) == 0:
                 continue
             
+            # Normalize column names (handle various naming conventions)
+            df_cols = df.columns.str.lower()
+            col_mapping = {}
+            
+            # Patient ID column (try various names)
+            for col_name in ['subject_id', 'patient_id', 'patientid', 'eid', 'id']:
+                if col_name in df_cols.values:
+                    col_mapping['patient_id'] = df.columns[df_cols == col_name][0]
+                    break
+            
+            # Code column (try various names)
+            for col_name in ['code', 'phecode', 'icd', 'icd_code', 'med', 'med_code', 'opcs', 'opcs_code', 'diagnosis', 'diagnosis_code']:
+                if col_name in df_cols.values:
+                    col_mapping['code'] = df.columns[df_cols == col_name][0]
+                    break
+            
+            # Timestamp column (try various names)
+            for col_name in ['timestamp', 'date', 'time', 'event_date', 'diag_date', 'visit_date', 
+                             'event_dt', 'admit_date', 'admission_date', 'record_date', 'diagnosis_date']:
+                if col_name in df_cols.values:
+                    col_mapping['timestamp'] = df.columns[df_cols == col_name][0]
+                    break
+            
+            # Validate required columns exist
+            missing_cols = []
+            if 'patient_id' not in col_mapping:
+                missing_cols.append('patient_id (tried: SUBJECT_ID, patient_id, eid, id)')
+            if 'code' not in col_mapping:
+                missing_cols.append('code (tried: code, PheCode, ICD, diagnosis)')
+            if 'timestamp' not in col_mapping:
+                missing_cols.append('timestamp (tried: timestamp, date, time, event_date)')
+            
+            if missing_cols:
+                error_msg = f"Missing required columns in {modality_name} data.\n"
+                error_msg += f"  Columns not found: {', '.join(missing_cols)}\n"
+                error_msg += f"  Available columns: {list(df.columns)}\n\n"
+                error_msg += "For temporal inference, your data file must have:\n"
+                error_msg += "  1. Patient ID column: SUBJECT_ID, patient_id, eid, or id\n"
+                error_msg += "  2. Code column: code, PheCode, ICD, diagnosis, etc.\n"
+                error_msg += "  3. Timestamp column: timestamp, date, event_date, etc.\n\n"
+                error_msg += "Example format:\n"
+                error_msg += "  SUBJECT_ID,code,timestamp\n"
+                error_msg += "  patient_001,E11.9,2015-03-15\n"
+                error_msg += "  patient_001,I10,2016-01-10\n"
+                raise ValueError(error_msg)
+            
+            # Create a working copy with standardized column names
+            df_work = df.copy()
+            df_work['_patient_id'] = df_work[col_mapping['patient_id']]
+            df_work['_code'] = df_work[col_mapping['code']]
+            df_work['_timestamp'] = df_work[col_mapping['timestamp']]
+            
             # Parse timestamps
             if bucket_type == 'visit':
-                df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+                df_work['_timestamp'] = pd.to_numeric(df_work['_timestamp'], errors='coerce')
             else:
-                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                df_work['_timestamp'] = pd.to_datetime(df_work['_timestamp'], errors='coerce')
             
-            for _, row in df.iterrows():
-                patient_id = str(row['SUBJECT_ID'])
-                code = str(row['code'])
-                timestamp = row['timestamp']
+            for _, row in df_work.iterrows():
+                patient_id = str(row['_patient_id'])
+                code = str(row['_code'])
+                timestamp = row['_timestamp']
                 
                 if pd.isna(timestamp):
                     continue
