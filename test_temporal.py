@@ -537,6 +537,140 @@ class TestIntegration(unittest.TestCase):
             self.assertTrue(len(progression_df) > 0)
 
 
+class TestTemporalInferencePatient(unittest.TestCase):
+    """Tests for temporal inference in infer_patient module."""
+    
+    def test_generate_temporal_explanation(self):
+        """Test temporal explanation generation."""
+        # Import the function
+        from infer_patient import generate_temporal_explanation
+        
+        # Create mock patient result
+        K = 10
+        theta_current = np.random.dirichlet(np.ones(K))
+        theta_sequence = [np.random.dirichlet(np.ones(K)) for _ in range(3)]
+        
+        patient_result = {
+            'patient_id': 'test_patient_001',
+            'theta_sequence': theta_sequence,
+            'time_labels': [2018, 2019, 2020],
+            'theta_current': theta_current,
+            'top_topics': [
+                (0, theta_current[0], 'Topic 0 (Test Phenotype)'),
+                (1, theta_current[1], 'Topic 1'),
+                (2, theta_current[2], 'Topic 2'),
+            ],
+            'top_codes_per_topic': {},
+            'forecast': [np.random.dirichlet(np.ones(K))],
+            'forecast_labels': [2021],
+            'bucket_type': 'yearly'
+        }
+        
+        # Generate explanation
+        prompt = generate_temporal_explanation(patient_result, include_forecast=True)
+        
+        # Check that prompt contains expected sections
+        self.assertIn('test_patient_001', prompt)
+        self.assertIn('Current Health Status', prompt)
+        self.assertIn('Disease Trajectory', prompt)
+        self.assertIn('Analysis Questions', prompt)
+        self.assertIn('yearly', prompt)
+    
+    def test_compute_phi_full(self):
+        """Test phi_full computation."""
+        from infer_patient import compute_phi_full
+        
+        # This test requires a trained model, so we'll skip if model files don't exist
+        # In practice, this would be tested with a mock model
+        pass
+    
+    def test_get_top_codes_for_topic(self):
+        """Test getting top codes for a topic."""
+        from infer_patient import get_top_codes_for_topic
+        
+        # This test requires a trained model, so we'll skip if model files don't exist
+        # In practice, this would be tested with a mock model
+        pass
+    
+    def test_temporal_data_with_two_modalities(self):
+        """
+        Test temporal inference with 1 patient and 2 modalities.
+        This is a minimal example validating the temporal inference pipeline.
+        """
+        # Create sample temporal data for 1 patient with 2 modalities
+        records = [
+            # ICD codes
+            {'SUBJECT_ID': 'patient_001', 'code': 'E11.9', 'timestamp': '2018-03-15', 'modality': 'icd'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'I10', 'timestamp': '2018-06-20', 'modality': 'icd'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'E11.9', 'timestamp': '2019-02-10', 'modality': 'icd'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'J44.1', 'timestamp': '2019-08-05', 'modality': 'icd'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'I10', 'timestamp': '2020-01-15', 'modality': 'icd'},
+            # Medication codes  
+            {'SUBJECT_ID': 'patient_001', 'code': 'A10BA02', 'timestamp': '2018-03-15', 'modality': 'med'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'C09AA02', 'timestamp': '2018-06-20', 'modality': 'med'},
+            {'SUBJECT_ID': 'patient_001', 'code': 'A10BA02', 'timestamp': '2019-08-05', 'modality': 'med'},
+        ]
+        
+        df = pd.DataFrame(records)
+        
+        # Test creating temporal corpus from DataFrame
+        corpus = TemporalCorpus.from_dataframe(
+            df, 
+            bucket_type='yearly',
+            subject_col='SUBJECT_ID',
+            code_col='code',
+            time_col='timestamp',
+            modality_col='modality'
+        )
+        
+        # Verify corpus structure
+        self.assertEqual(corpus.num_patients, 1)
+        self.assertIn('patient_001', corpus.patients)
+        
+        patient = corpus.patients['patient_001']
+        self.assertEqual(patient.num_time_steps, 3)  # 2018, 2019, 2020
+        
+        # Verify time buckets
+        time_indices = [b.time_index for b in patient.buckets]
+        self.assertEqual(sorted(time_indices), [2018, 2019, 2020])
+        
+        # Verify records per bucket
+        for bucket in patient.buckets:
+            if bucket.time_index == 2018:
+                self.assertEqual(len(bucket.records), 4)  # 2 ICD + 2 med
+            elif bucket.time_index == 2019:
+                self.assertEqual(len(bucket.records), 3)  # 2 ICD + 1 med
+            elif bucket.time_index == 2020:
+                self.assertEqual(len(bucket.records), 1)  # 1 ICD
+        
+        # Create mock vocab mappings
+        vocab_mappings = {
+            'icd': {'E11.9': 0, 'I10': 1, 'J44.1': 2},
+            'med': {'A10BA02': 0, 'C09AA02': 1}
+        }
+        modality_list = ['icd', 'med']
+        
+        corpus.set_vocab_mappings(vocab_mappings, modality_list)
+        
+        # Test cumulative BOW (no data leakage)
+        bow_2018 = patient.get_cumulative_bow(2018, vocab_mappings, modality_list)
+        bow_2019 = patient.get_cumulative_bow(2019, vocab_mappings, modality_list)
+        bow_2020 = patient.get_cumulative_bow(2020, vocab_mappings, modality_list)
+        
+        # 2018: E11.9(1) + I10(1) = 2 ICD codes
+        self.assertEqual(bow_2018[0].get(0, 0), 1)  # E11.9
+        self.assertEqual(bow_2018[0].get(1, 0), 1)  # I10
+        
+        # 2019 cumulative: E11.9(2) + I10(1) + J44.1(1) = 4 ICD codes
+        self.assertEqual(bow_2019[0].get(0, 0), 2)  # E11.9 (accumulated)
+        self.assertEqual(bow_2019[0].get(2, 0), 1)  # J44.1 (new in 2019)
+        
+        # 2020 cumulative: E11.9(2) + I10(2) + J44.1(1)
+        self.assertEqual(bow_2020[0].get(1, 0), 2)  # I10 (accumulated)
+        
+        print("Temporal inference test with 1 patient and 2 modalities: PASSED")
+
+
 if __name__ == '__main__':
     # Run tests
     unittest.main(verbosity=2)

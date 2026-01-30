@@ -10,8 +10,9 @@ This document explains how to use the temporal analysis features of MixEHR-SAGE 
 5. [Progression Models](#progression-models)
 6. [LSTM Temporal Model](#lstm-temporal-model)
 7. [Output Format](#output-format)
-8. [Example Workflow](#example-workflow)
-9. [API Reference](#api-reference)
+8. [Temporal Inference for New Patients](#temporal-inference-for-new-patients)
+9. [Example Workflow](#example-workflow)
+10. [API Reference](#api-reference)
 
 ## Overview
 
@@ -635,6 +636,144 @@ for h in range(1, 6):
     risk = markov.predict_disease_risk(current_theta, horizon=h)
     print(f"Horizon {h}: Topic {risk['max_risk_topic']} with prob {risk['max_risk']:.4f}")
 ```
+
+## Temporal Inference for New Patients
+
+This section explains how to perform temporal inference for **new patients** using a trained MixEHR-SAGE model. The trained parameters (phi, pi, etc.) are kept unchanged during inference.
+
+### Key Features
+
+- **Uses φ_full = π × φ^s + (1-π) × φ^r** for the guided modality during likelihood computation
+- **Keeps all trained parameters unchanged** - no training or parameter modification
+- **Per-time-bucket theta computation** with cumulative bag-of-words to prevent data leakage
+- **Simple forecast** for future time steps using exponential smoothing
+- **Structured explanations** with temporal information
+
+### CLI Usage
+
+```bash
+# Temporal inference with separate modality files
+python infer_patient.py ./results/ \
+    --temporal-icd ./data/patient_icd.csv \
+    --temporal-med ./data/patient_med.csv \
+    --temporal-inference \
+    --bucket-type yearly \
+    --output patient_temporal_theta.csv
+
+# With forecasting (3 future time steps)
+python infer_patient.py ./results/ \
+    --temporal-icd ./data/patient_icd.csv \
+    --temporal-inference \
+    --forecast-horizon 3 \
+    --bucket-type yearly \
+    --output patient_theta.csv
+
+# Generate explanation prompts
+python infer_patient.py ./results/ \
+    --temporal-icd ./data/patient_icd.csv \
+    --temporal-med ./data/patient_med.csv \
+    --temporal-inference \
+    --explain \
+    --explain-output explanations.txt \
+    --bucket-type yearly \
+    --output patient_theta.csv
+```
+
+### Input Data Format
+
+For temporal inference, each modality file should have columns:
+- `SUBJECT_ID`: Patient identifier
+- `code`: Medical code
+- `timestamp`: Date (YYYY-MM-DD) or visit index
+
+**Example ICD file (patient_icd.csv):**
+```csv
+SUBJECT_ID,code,timestamp
+patient_001,E11.9,2018-03-15
+patient_001,I10,2018-06-20
+patient_001,E11.9,2019-02-10
+patient_001,J44.1,2019-08-05
+patient_001,I10,2020-01-15
+```
+
+### Python API
+
+```python
+from infer_patient import infer_temporal_patient, generate_temporal_explanation
+from corpus import Corpus, read_data_file
+from MixEHR_SAGE import MixEHR_SAGE
+import torch
+import pickle
+
+# Load trained model
+corpus = Corpus.read_corpus_from_directory('./store/')
+seeds = torch.load('./phecode_mapping/seed_topic_matrix.pt')
+model = MixEHR_SAGE.load_trained_model(
+    './results/', corpus, seeds, corpus.modalities
+)
+
+# Load vocabulary mappings
+with open('./mapping/icd_vocab_ids.pkl', 'rb') as f:
+    icd_vocab = pickle.load(f)
+with open('./mapping/med_vocab_ids.pkl', 'rb') as f:
+    med_vocab = pickle.load(f)
+vocab_mappings = {'icd': icd_vocab, 'med': med_vocab}
+
+# Prepare temporal data (separate DataFrames per modality)
+temporal_data = {
+    'icd': read_data_file('./data/patient_icd.csv'),
+    'med': read_data_file('./data/patient_med.csv'),
+}
+
+# Run temporal inference
+result = infer_temporal_patient(
+    model=model,
+    temporal_data=temporal_data,
+    vocab_mappings=vocab_mappings,
+    modality_list=corpus.modalities,
+    bucket_type='yearly',
+    num_iterations=10,
+    method='variational',
+    forecast_horizon=3,  # Forecast 3 future time steps
+    forecast_smoothing=0.9
+)
+
+# Access results
+print(f"Patient: {result['patient_id']}")
+print(f"Time points: {result['time_labels']}")
+print(f"Current theta shape: {result['theta_current'].shape}")
+print(f"Top topics: {result['top_topics'][:5]}")
+
+# Generate explanation
+explanation = generate_temporal_explanation(result, include_forecast=True)
+print(explanation)
+```
+
+### Output Structure
+
+The `infer_temporal_patient` function returns a dictionary with:
+
+| Key | Description |
+|-----|-------------|
+| `patient_id` | Patient identifier |
+| `theta_sequence` | List of theta arrays (one per time bucket) |
+| `time_labels` | List of time bucket labels |
+| `theta_current` | Latest theta (at the most recent time) |
+| `top_topics` | List of (topic_idx, probability, name) tuples |
+| `top_codes_per_topic` | Dict mapping topic to top contributing codes |
+| `forecast` | List of forecasted theta arrays (if forecast_horizon > 0) |
+| `forecast_labels` | List of forecast time labels |
+| `bucket_type` | Type of time bucketing used |
+
+### Understanding the Explanation Prompt
+
+The generated explanation includes:
+
+1. **Current Health Status**: Top disease phenotypes and probabilities
+2. **Disease Trajectory**: Evolution of top topics over time with trend indicators
+3. **Contributing Codes**: Top medical codes per topic (using φ_full)
+4. **Future Risk Forecast**: Extrapolated theta for future time periods
+5. **Analysis Questions**: Prompts for clinical interpretation
 
 ## Example Workflow
 

@@ -48,6 +48,94 @@ def load_vocab_mappings(mapping_path='./mapping/'):
     return vocab_mappings
 
 
+def compute_phi_full(model, topic_idx):
+    """
+    Compute the full/combined phi distribution for a topic for display purposes.
+    
+    Note: The model's infer_theta_fast already uses combined phi internally.
+    This function is for extracting phi values for explanation/display.
+    
+    For the guided modality: φ_full = π × φ^s + (1 - π) × φ^r (for seed words)
+    For other modalities: φ_full = φ^r
+    
+    Args:
+        model: trained MixEHR_SAGE model
+        topic_idx: topic index
+        
+    Returns:
+        dict mapping modality index to phi_full array for that topic
+    """
+    phi_full = {}
+    
+    for m in range(model.modaltiy_num):
+        phi_r = model.get_phi(modality=m)  # V x K
+        phi_r_np = phi_r.cpu().numpy()[:, topic_idx]
+        
+        if m == model.guided_modality:
+            phi_s = model.get_phi_seed()  # V x K
+            phi_s_np = phi_s.cpu().numpy()[:, topic_idx]
+            seeds_matrix = model.seeds_topic_matrix.cpu().numpy()[:, topic_idx]
+            
+            pi = model.pi.cpu().numpy() if torch.is_tensor(model.pi) else model.pi
+            pi_k = pi[topic_idx] if hasattr(pi, '__len__') else pi
+            
+            # φ_full = (1 - π) × φ^r + π × φ^s for seed words
+            phi_full_topic = phi_r_np.copy()
+            is_seed = seeds_matrix > 0
+            phi_full_topic[is_seed] = (1 - pi_k) * phi_r_np[is_seed] + pi_k * phi_s_np[is_seed]
+        else:
+            phi_full_topic = phi_r_np
+        
+        phi_full[m] = phi_full_topic
+    
+    return phi_full
+
+
+def get_top_codes_for_topic(model, topic_idx, vocab_mappings, modality_list, top_n=10):
+    """
+    Get top contributing codes for a topic using φ_full.
+    
+    Args:
+        model: trained MixEHR_SAGE model
+        topic_idx: topic index
+        vocab_mappings: vocabulary mappings
+        modality_list: list of modality names
+        top_n: number of top codes to return
+        
+    Returns:
+        dict mapping modality name to list of (code, probability) tuples
+    """
+    phi_full = compute_phi_full(model, topic_idx)
+    
+    # Create reverse vocabulary mappings
+    reverse_vocabs = {}
+    for modality, vocab in vocab_mappings.items():
+        reverse_vocabs[modality] = {word_id: code for code, word_id in vocab.items()}
+    
+    top_codes = {}
+    for m, modality_name in enumerate(modality_list):
+        if modality_name not in vocab_mappings:
+            continue
+        
+        phi_m = phi_full.get(m)
+        if phi_m is None:
+            continue
+        
+        top_indices = np.argsort(phi_m)[::-1][:top_n]
+        codes_info = []
+        
+        for idx in top_indices:
+            if idx in reverse_vocabs[modality_name]:
+                code = reverse_vocabs[modality_name][idx]
+                prob = phi_m[idx]
+                codes_info.append((code, prob))
+        
+        if codes_info:
+            top_codes[modality_name] = codes_info
+    
+    return top_codes
+
+
 def convert_patient_data_to_bow(patient_df, vocab_mappings, modality_list, word_column='code'):
     """
     Convert patient data DataFrame to bag-of-words format.
@@ -291,6 +379,321 @@ def infer_from_file(model, patient_file, vocab_mappings, modality_list,
     if return_bow:
         return pd.DataFrame(results), patients_bow
     return pd.DataFrame(results)
+
+
+def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
+                           cutoff_date=None, bucket_type='yearly', num_iterations=10,
+                           method='variational', forecast_horizon=0, forecast_smoothing=0.9):
+    """
+    Temporal inference for new patients using trained model parameters.
+    
+    This function supports longitudinal patient data and computes per-time theta sequences
+    while preserving all trained parameters (phi, pi, etc.) unchanged.
+    
+    Uses φ_full = (1 - π) × φ^r + π × φ^s for the guided modality during inference.
+    
+    Args:
+        model: trained MixEHR_SAGE model (parameters NOT modified)
+        temporal_data: Either:
+            - DataFrame with columns: SUBJECT_ID, code, timestamp, modality
+            - Dict mapping modality to DataFrame with: SUBJECT_ID, code, timestamp
+        vocab_mappings: vocabulary mappings
+        modality_list: list of modality names
+        cutoff_date: Only include records up to this date (optional, string 'YYYY-MM-DD')
+        bucket_type: Bucketing strategy ('yearly', 'monthly', 'quarterly', 'visit')
+        num_iterations: inference iterations
+        method: inference method ('variational' or 'gibbs')
+        forecast_horizon: number of future time steps to forecast (0 = no forecast)
+        forecast_smoothing: smoothing factor for theta extrapolation (0-1, higher=more persistence)
+        
+    Returns:
+        dict: {
+            'patient_id': patient_id,
+            'theta_sequence': list of theta arrays (T x K),
+            'time_labels': list of time labels,
+            'theta_current': current (latest) theta,
+            'top_topics': list of (topic_idx, probability, topic_name) for top topics,
+            'top_codes_per_topic': dict mapping topic_idx to top contributing codes,
+            'forecast': list of forecasted theta arrays (if forecast_horizon > 0),
+            'forecast_labels': list of forecast time labels
+        }
+    """
+    from temporal_corpus import TemporalCorpus
+    
+    # Create temporal corpus from data
+    if isinstance(temporal_data, dict):
+        # Separate files per modality
+        corpus = TemporalCorpus(bucket_type=bucket_type)
+        
+        for modality_name, df in temporal_data.items():
+            if df is None or len(df) == 0:
+                continue
+            
+            # Parse timestamps
+            if bucket_type == 'visit':
+                df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+            else:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            
+            for _, row in df.iterrows():
+                patient_id = str(row['SUBJECT_ID'])
+                code = str(row['code'])
+                timestamp = row['timestamp']
+                
+                if pd.isna(timestamp):
+                    continue
+                    
+                # Apply cutoff date if specified
+                if cutoff_date and bucket_type != 'visit':
+                    cutoff_dt = pd.to_datetime(cutoff_date)
+                    if timestamp > cutoff_dt:
+                        continue
+                
+                # Get or create patient
+                if patient_id not in corpus.patients:
+                    from temporal_corpus import TemporalPatient
+                    corpus.patients[patient_id] = TemporalPatient(patient_id)
+                patient = corpus.patients[patient_id]
+                
+                # Compute bucket info
+                bucket_info = corpus._compute_bucket_info(timestamp)
+                time_index = bucket_info['index']
+                
+                # Get or create bucket
+                bucket = patient.get_bucket(time_index)
+                if bucket is None:
+                    from temporal_corpus import TemporalBucket
+                    bucket = TemporalBucket(
+                        patient_id=patient_id,
+                        time_index=time_index,
+                        start_time=bucket_info['start'],
+                        end_time=bucket_info['end'],
+                        bucket_type=bucket_type
+                    )
+                    patient.add_bucket(bucket)
+                
+                bucket.add_record(code, modality_name, timestamp)
+    else:
+        # Single DataFrame with modality column
+        corpus = TemporalCorpus.from_dataframe(temporal_data, bucket_type=bucket_type)
+    
+    corpus.set_vocab_mappings(vocab_mappings, modality_list)
+    
+    # Process each patient
+    results = []
+    for patient_id, patient in corpus.patients.items():
+        # Compute theta for each time bucket (cumulative to prevent data leakage)
+        theta_sequence = []
+        time_labels = []
+        
+        for bucket in patient.buckets:
+            bow = patient.get_cumulative_bow(bucket.time_index, vocab_mappings, modality_list)
+            has_records = any(len(bow_m) > 0 for bow_m in bow)
+            
+            if has_records:
+                theta_t = model.infer_theta_fast(bow, num_iterations=num_iterations, method=method)
+            else:
+                if len(theta_sequence) > 0:
+                    theta_t = theta_sequence[-1].clone()
+                else:
+                    theta_t = torch.ones(model.K, dtype=torch.double, device=device) / model.K
+            
+            theta_sequence.append(theta_t)
+            time_labels.append(bucket.time_index)
+        
+        # Get current (latest) theta
+        theta_current = theta_sequence[-1] if theta_sequence else torch.ones(model.K, dtype=torch.double, device=device) / model.K
+        theta_current_np = theta_current.cpu().numpy()
+        
+        # Get top topics
+        top_k = 10
+        top_topic_indices = np.argsort(theta_current_np)[::-1][:top_k]
+        
+        # Load phenotype names
+        phecode_dict = load_phecode_definitions()
+        inv_phecode_ids = load_phecode_ids_mapping()
+        
+        top_topics = []
+        for topic_idx in top_topic_indices:
+            prob = theta_current_np[topic_idx]
+            topic_name = f"Topic {topic_idx}"
+            if topic_idx in inv_phecode_ids:
+                phecode = inv_phecode_ids[topic_idx]
+                if phecode in phecode_dict:
+                    topic_name = f"{phecode} ({phecode_dict[phecode]})"
+                else:
+                    topic_name = f"PheCode {phecode}"
+            top_topics.append((topic_idx, prob, topic_name))
+        
+        # Get top codes for each top topic
+        top_codes_per_topic = {}
+        for topic_idx, _, _ in top_topics[:5]:  # Top 5 topics
+            top_codes_per_topic[topic_idx] = get_top_codes_for_topic(
+                model, topic_idx, vocab_mappings, modality_list, top_n=10
+            )
+        
+        # Forecast future theta if requested
+        forecast = []
+        forecast_labels = []
+        if forecast_horizon > 0 and len(theta_sequence) >= 2:
+            # Simple smoothing-based forecast: theta_{t+1} = α * theta_t + (1-α) * theta_{t-1}
+            # Or Markov-style if model available
+            current_theta = theta_current_np.copy()
+            
+            # Compute trend from recent history
+            if len(theta_sequence) >= 2:
+                prev_theta = theta_sequence[-2].cpu().numpy()
+                trend = current_theta - prev_theta
+            else:
+                trend = np.zeros_like(current_theta)
+            
+            last_time = time_labels[-1] if time_labels else 0
+            
+            for h in range(1, forecast_horizon + 1):
+                # Forecast: smooth transition with dampened trend
+                dampening = forecast_smoothing ** h
+                forecast_theta = current_theta + dampening * trend
+                
+                # Ensure valid probability distribution
+                forecast_theta = np.maximum(forecast_theta, 1e-10)
+                forecast_theta = forecast_theta / forecast_theta.sum()
+                
+                forecast.append(forecast_theta)
+                
+                # Generate forecast time label
+                if bucket_type == 'yearly':
+                    forecast_labels.append(last_time + h)
+                elif bucket_type == 'monthly':
+                    forecast_labels.append(last_time + h)
+                elif bucket_type == 'quarterly':
+                    forecast_labels.append(last_time + h)
+                else:
+                    forecast_labels.append(last_time + h)
+        
+        # Compile results for this patient
+        result = {
+            'patient_id': patient_id,
+            'theta_sequence': [t.cpu().numpy() for t in theta_sequence],
+            'time_labels': time_labels,
+            'theta_current': theta_current_np,
+            'top_topics': top_topics,
+            'top_codes_per_topic': top_codes_per_topic,
+            'forecast': forecast,
+            'forecast_labels': forecast_labels,
+            'bucket_type': bucket_type
+        }
+        results.append(result)
+    
+    return results[0] if len(results) == 1 else results
+
+
+def generate_temporal_explanation(patient_result, model=None, include_forecast=True):
+    """
+    Generate a structured explanation prompt with temporal information.
+    
+    Args:
+        patient_result: dict from infer_temporal_patient
+        model: optional MixEHR_SAGE model for additional context
+        include_forecast: whether to include forecast section
+        
+    Returns:
+        str: formatted explanation prompt
+    """
+    patient_id = patient_result['patient_id']
+    theta_sequence = patient_result['theta_sequence']
+    time_labels = patient_result['time_labels']
+    theta_current = patient_result['theta_current']
+    top_topics = patient_result['top_topics']
+    top_codes = patient_result.get('top_codes_per_topic', {})
+    forecast = patient_result.get('forecast', [])
+    forecast_labels = patient_result.get('forecast_labels', [])
+    bucket_type = patient_result.get('bucket_type', 'yearly')
+    
+    prompt = f"""# Temporal Disease Profile Analysis: Patient {patient_id}
+
+## Current Health Status (Latest θ)
+
+Based on MixEHR-SAGE analysis using φ_full = (1-π)×φ^r + π×φ^s:
+
+**Top Disease Phenotypes:**
+"""
+    
+    for i, (topic_idx, prob, topic_name) in enumerate(top_topics[:5], 1):
+        prompt += f"  {i}. {topic_name}: θ={prob:.4f} ({prob*100:.2f}%)\n"
+    
+    # Timeline section
+    if len(theta_sequence) > 1:
+        prompt += f"\n## Disease Trajectory Over Time ({bucket_type} granularity)\n"
+        prompt += f"Time points: {len(time_labels)} ({min(time_labels)} to {max(time_labels)})\n\n"
+        
+        # Show evolution of top 3 topics
+        prompt += "**Phenotype Evolution (Top 3):**\n"
+        for topic_idx, _, topic_name in top_topics[:3]:
+            prompt += f"\n{topic_name}:\n  "
+            trajectory = []
+            for t_idx, (theta_t, label) in enumerate(zip(theta_sequence, time_labels)):
+                theta_val = theta_t[topic_idx] if topic_idx < len(theta_t) else 0
+                trajectory.append(f"{label}:{theta_val:.3f}")
+            prompt += " → ".join(trajectory[-6:])  # Last 6 time points
+            
+            # Add trend analysis
+            if len(theta_sequence) >= 2:
+                first_val = theta_sequence[0][topic_idx] if topic_idx < len(theta_sequence[0]) else 0
+                last_val = theta_sequence[-1][topic_idx] if topic_idx < len(theta_sequence[-1]) else 0
+                change = last_val - first_val
+                if change > 0.05:
+                    prompt += " ↑ INCREASING"
+                elif change < -0.05:
+                    prompt += " ↓ DECREASING"
+                else:
+                    prompt += " → STABLE"
+            prompt += "\n"
+    
+    # Top codes section
+    if top_codes:
+        prompt += "\n## Contributing Medical Codes (using φ_full)\n"
+        for topic_idx in list(top_codes.keys())[:3]:
+            topic_name = next((name for idx, _, name in top_topics if idx == topic_idx), f"Topic {topic_idx}")
+            prompt += f"\n**{topic_name}:**\n"
+            for modality, codes in top_codes[topic_idx].items():
+                prompt += f"  {modality.upper()}: "
+                code_strs = [f"{code} (φ={prob:.4f})" for code, prob in codes[:5]]
+                prompt += ", ".join(code_strs) + "\n"
+    
+    # Forecast section
+    if include_forecast and forecast:
+        prompt += f"\n## Future Risk Forecast (Next {len(forecast)} {bucket_type} periods)\n"
+        prompt += "Based on exponential smoothing extrapolation:\n\n"
+        
+        for topic_idx, _, topic_name in top_topics[:3]:
+            current_val = theta_current[topic_idx]
+            prompt += f"**{topic_name}:**\n"
+            prompt += f"  Current: {current_val:.4f}\n"
+            prompt += "  Forecast: "
+            forecast_vals = []
+            for f_theta, f_label in zip(forecast, forecast_labels):
+                f_val = f_theta[topic_idx] if topic_idx < len(f_theta) else 0
+                forecast_vals.append(f"{f_label}:{f_val:.4f}")
+            prompt += " → ".join(forecast_vals) + "\n"
+    
+    # Analysis questions
+    prompt += """
+## Analysis Questions
+
+Based on the temporal disease profile above:
+
+1. **Current Risk Assessment**: What are the patient's primary health conditions based on the current phenotype distribution?
+
+2. **Temporal Patterns**: Are there concerning trends in disease progression over time? Which conditions are worsening?
+
+3. **Future Disease Risk**: Based on the trajectory and current profile, what new conditions might develop in the next 6-12 months?
+
+4. **Comorbidity Analysis**: What comorbidity patterns are evident, and how do they affect prognosis?
+
+5. **Recommended Monitoring**: Which phenotypes require closest monitoring based on the trends?
+"""
+    
+    return prompt
 
 
 def load_phecode_definitions(phecode_def_path='./mapping/phecode_definitions1.2.csv'):
@@ -764,6 +1167,28 @@ Input Data Format:
         default=1,
         help='Prediction horizon for future disease risk (default: 1 time step)'
     )
+    parser.add_argument(
+        '--temporal-inference',
+        action='store_true',
+        help='Enable temporal inference mode for time-series patient data'
+    )
+    parser.add_argument(
+        '--cutoff-date',
+        default=None,
+        help='Only include records up to this date (YYYY-MM-DD format)'
+    )
+    parser.add_argument(
+        '--forecast-horizon',
+        type=int,
+        default=0,
+        help='Number of future time steps to forecast (default: 0, no forecast)'
+    )
+    parser.add_argument(
+        '--forecast-smoothing',
+        type=float,
+        default=0.9,
+        help='Smoothing factor for theta extrapolation (0-1, higher=more persistence, default: 0.9)'
+    )
     
     args = parser.parse_args()
     
@@ -843,6 +1268,191 @@ Input Data Format:
     if args.opcs:
         modality_files['opcs'] = args.opcs
     
+    # Check for temporal inference mode
+    has_temporal_data = args.temporal_data or args.temporal_icd or args.temporal_med or args.temporal_opcs
+    
+    if args.temporal_inference or has_temporal_data:
+        # ============================================
+        # TEMPORAL INFERENCE MODE
+        # ============================================
+        print("\n" + "="*60)
+        print("TEMPORAL INFERENCE MODE")
+        print("="*60)
+        print("Using trained model parameters (phi, pi) unchanged.")
+        print("Inference uses φ_full = π × φ^s + (1-π) × φ^r internally.")
+        
+        # Collect temporal data files
+        temporal_modality_data = {}
+        
+        if args.temporal_data:
+            # Single file with modality column
+            print(f"\nLoading temporal data from {args.temporal_data}...")
+            df = read_data_file(args.temporal_data)
+            # This will be handled by infer_temporal_patient
+            temporal_df = df
+        else:
+            # Separate files per modality
+            temporal_df = None
+            if args.temporal_icd:
+                print(f"Loading temporal ICD data from {args.temporal_icd}...")
+                temporal_modality_data['icd'] = read_data_file(args.temporal_icd)
+            if args.temporal_med:
+                print(f"Loading temporal medication data from {args.temporal_med}...")
+                temporal_modality_data['med'] = read_data_file(args.temporal_med)
+            if args.temporal_opcs:
+                print(f"Loading temporal OPCS data from {args.temporal_opcs}...")
+                temporal_modality_data['opcs'] = read_data_file(args.temporal_opcs)
+        
+        # Run temporal inference
+        if temporal_df is not None:
+            temporal_results = infer_temporal_patient(
+                model=model,
+                temporal_data=temporal_df,
+                vocab_mappings=vocab_mappings,
+                modality_list=modality_list,
+                cutoff_date=args.cutoff_date,
+                bucket_type=args.bucket_type,
+                num_iterations=args.iterations,
+                method=args.method,
+                forecast_horizon=args.forecast_horizon,
+                forecast_smoothing=args.forecast_smoothing
+            )
+        else:
+            temporal_results = infer_temporal_patient(
+                model=model,
+                temporal_data=temporal_modality_data,
+                vocab_mappings=vocab_mappings,
+                modality_list=modality_list,
+                cutoff_date=args.cutoff_date,
+                bucket_type=args.bucket_type,
+                num_iterations=args.iterations,
+                method=args.method,
+                forecast_horizon=args.forecast_horizon,
+                forecast_smoothing=args.forecast_smoothing
+            )
+        
+        # Handle single patient or multiple patients
+        if not isinstance(temporal_results, list):
+            temporal_results = [temporal_results]
+        
+        print(f"\nProcessed {len(temporal_results)} patients with temporal inference")
+        
+        # Convert temporal results to DataFrame for theta output
+        theta_rows = []
+        for result in temporal_results:
+            patient_id = result['patient_id']
+            theta_current = result['theta_current']
+            
+            row = {'patient_id': patient_id}
+            for k, val in enumerate(theta_current):
+                row[f'topic_{k}'] = val
+            theta_rows.append(row)
+        
+        results_df = pd.DataFrame(theta_rows)
+        
+        # Save theta sequences if forecast was requested
+        if args.forecast_horizon > 0:
+            sequence_rows = []
+            for result in temporal_results:
+                patient_id = result['patient_id']
+                
+                # Historical theta
+                for t, (theta_t, label) in enumerate(zip(result['theta_sequence'], result['time_labels'])):
+                    row = {
+                        'patient_id': patient_id,
+                        'time_index': label,
+                        'time_type': 'historical'
+                    }
+                    for k, val in enumerate(theta_t):
+                        row[f'theta_{k}'] = val
+                    sequence_rows.append(row)
+                
+                # Forecasted theta
+                for f_theta, f_label in zip(result['forecast'], result['forecast_labels']):
+                    row = {
+                        'patient_id': patient_id,
+                        'time_index': f_label,
+                        'time_type': 'forecast'
+                    }
+                    for k, val in enumerate(f_theta):
+                        row[f'theta_{k}'] = val
+                    sequence_rows.append(row)
+            
+            seq_df = pd.DataFrame(sequence_rows)
+            seq_output = args.output.replace('.csv', '_sequences.csv')
+            seq_df.to_csv(seq_output, index=False)
+            print(f"Theta sequences (with forecast) saved to {seq_output}")
+        
+        # Generate explanations if requested
+        if args.explain:
+            print(f"\nGenerating temporal explanation prompts...")
+            explanations = []
+            
+            for result in temporal_results:
+                prompt = generate_temporal_explanation(
+                    result,
+                    model=model,
+                    include_forecast=(args.forecast_horizon > 0)
+                )
+                explanations.append({
+                    'patient_id': result['patient_id'],
+                    'prompt': prompt
+                })
+            
+            # Save explanations
+            explain_ext = os.path.splitext(args.explain_output.lower())[1]
+            
+            if explain_ext == '.json':
+                with open(args.explain_output, 'w') as f:
+                    json.dump(explanations, f, indent=2)
+            elif explain_ext == '.csv':
+                pd.DataFrame(explanations).to_csv(args.explain_output, index=False)
+            else:
+                with open(args.explain_output, 'w') as f:
+                    for i, expl in enumerate(explanations):
+                        if i > 0:
+                            f.write("\n\n" + "="*80 + "\n\n")
+                        f.write(f"Patient ID: {expl['patient_id']}\n")
+                        f.write("="*80 + "\n\n")
+                        f.write(expl['prompt'])
+            
+            print(f"Explanations saved to {args.explain_output}")
+        
+        # Print summary for each patient
+        print("\n" + "="*60)
+        print("TEMPORAL INFERENCE RESULTS SUMMARY")
+        print("="*60)
+        
+        for result in temporal_results[:5]:  # Show first 5 patients
+            print(f"\nPatient: {result['patient_id']}")
+            print(f"  Time points: {len(result['time_labels'])} ({result['bucket_type']} buckets)")
+            print(f"  Top 5 topics (current θ):")
+            for topic_idx, prob, topic_name in result['top_topics'][:5]:
+                print(f"    - {topic_name}: {prob:.4f}")
+            
+            if result['forecast']:
+                print(f"  Forecast: {len(result['forecast'])} steps ahead")
+        
+        if len(temporal_results) > 5:
+            print(f"\n  ... and {len(temporal_results) - 5} more patients")
+        
+        # Save results
+        output_ext = os.path.splitext(args.output.lower())[1]
+        if output_ext == '.json':
+            results_df.to_json(args.output, orient='records', indent=2)
+        elif output_ext == '.tsv':
+            results_df.to_csv(args.output, sep='\t', index=False)
+        else:
+            results_df.to_csv(args.output, index=False)
+        
+        print(f"\nCurrent theta saved to {args.output}")
+        print(f"Inferred temporal theta for {len(results_df)} patients")
+        
+        return  # Exit after temporal inference
+    
+    # ============================================
+    # STANDARD (NON-TEMPORAL) INFERENCE MODE
+    # ============================================
     # Check if we have modality-specific files or a single data file
     patients_bow = None
     if modality_files:
