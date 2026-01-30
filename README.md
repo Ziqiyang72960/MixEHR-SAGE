@@ -105,7 +105,33 @@ optional arguments:
   --explain-output      Output file for explanations (default: patient_explanations.txt)
   --explain-top-topics  Number of top topics in explanations (default: 5)
   --explain-top-codes   Number of top codes per topic (default: 10)
+  --patient-sex         Patient sex for filtering (male/female) - filters out opposite sex phecodes
 ```
+
+### Sex-Specific PheCode Filtering
+
+PheCodes include sex-specific conditions (e.g., cervical cancer for females, prostate cancer for males). To prevent inappropriate diagnoses during inference, use the `--patient-sex` argument:
+
+```bash
+# Male patient - filters out female-specific phecodes (cervical cancer, ovarian conditions, etc.)
+python infer_patient.py ./results/ --icd ./male_patient.csv -o theta.csv --patient-sex male
+
+# Female patient - filters out male-specific phecodes (prostate cancer, testicular conditions, etc.)
+python infer_patient.py ./results/ --icd ./female_patient.csv -o theta.csv --patient-sex female
+
+# Temporal inference with sex filtering
+python infer_patient.py ./results/ --temporal-icd ./patient_timeline.csv \
+  --temporal-inference --patient-sex male -o temporal_theta.csv
+```
+
+When `--patient-sex` is specified:
+- Topics corresponding to opposite-sex phecodes are zeroed out in the theta distribution
+- The theta distribution is renormalized to remain a valid probability distribution
+- This prevents male patients from being diagnosed with female-specific diseases and vice versa
+
+**Sex-specific PheCodes include:**
+- **Female-only (132 codes):** Cervical cancer, ovarian conditions, uterine disorders, pregnancy complications, etc.
+- **Male-only (34 codes):** Prostate cancer, testicular disorders, erectile dysfunction, etc.
 
 
 ### LLM Prompt Explanations Generation
