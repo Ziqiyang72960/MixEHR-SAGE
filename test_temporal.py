@@ -576,21 +576,19 @@ class TestTemporalInferencePatient(unittest.TestCase):
         self.assertIn('Analysis Questions', prompt)
         self.assertIn('yearly', prompt)
     
+    @unittest.skip("Requires trained model - test with mock model in integration tests")
     def test_compute_phi_full(self):
         """Test phi_full computation."""
         from infer_patient import compute_phi_full
-        
-        # This test requires a trained model, so we'll skip if model files don't exist
+        # This test requires a trained model
         # In practice, this would be tested with a mock model
-        pass
     
+    @unittest.skip("Requires trained model - test with mock model in integration tests")
     def test_get_top_codes_for_topic(self):
         """Test getting top codes for a topic."""
         from infer_patient import get_top_codes_for_topic
-        
-        # This test requires a trained model, so we'll skip if model files don't exist
+        # This test requires a trained model
         # In practice, this would be tested with a mock model
-        pass
     
     def test_temporal_data_with_two_modalities(self):
         """

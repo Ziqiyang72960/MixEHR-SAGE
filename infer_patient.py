@@ -79,10 +79,10 @@ def compute_phi_full(model, topic_idx):
             pi = model.pi.cpu().numpy() if torch.is_tensor(model.pi) else model.pi
             pi_k = pi[topic_idx] if hasattr(pi, '__len__') else pi
             
-            # φ_full = (1 - π) × φ^r + π × φ^s for seed words
+            # φ_full = π × φ^s + (1 - π) × φ^r for seed words
             phi_full_topic = phi_r_np.copy()
             is_seed = seeds_matrix > 0
-            phi_full_topic[is_seed] = (1 - pi_k) * phi_r_np[is_seed] + pi_k * phi_s_np[is_seed]
+            phi_full_topic[is_seed] = pi_k * phi_s_np[is_seed] + (1 - pi_k) * phi_r_np[is_seed]
         else:
             phi_full_topic = phi_r_np
         
@@ -479,6 +479,10 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
     
     corpus.set_vocab_mappings(vocab_mappings, modality_list)
     
+    # Load phenotype names once (outside the loop for efficiency)
+    phecode_dict = load_phecode_definitions()
+    inv_phecode_ids = load_phecode_ids_mapping()
+    
     # Process each patient
     results = []
     for patient_id, patient in corpus.patients.items():
@@ -509,10 +513,6 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
         top_k = 10
         top_topic_indices = np.argsort(theta_current_np)[::-1][:top_k]
         
-        # Load phenotype names
-        phecode_dict = load_phecode_definitions()
-        inv_phecode_ids = load_phecode_ids_mapping()
-        
         top_topics = []
         for topic_idx in top_topic_indices:
             prob = theta_current_np[topic_idx]
@@ -541,11 +541,8 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
             current_theta = theta_current_np.copy()
             
             # Compute trend from recent history
-            if len(theta_sequence) >= 2:
-                prev_theta = theta_sequence[-2].cpu().numpy()
-                trend = current_theta - prev_theta
-            else:
-                trend = np.zeros_like(current_theta)
+            prev_theta = theta_sequence[-2].cpu().numpy()
+            trend = current_theta - prev_theta
             
             last_time = time_labels[-1] if time_labels else 0
             
@@ -560,15 +557,8 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
                 
                 forecast.append(forecast_theta)
                 
-                # Generate forecast time label
-                if bucket_type == 'yearly':
-                    forecast_labels.append(last_time + h)
-                elif bucket_type == 'monthly':
-                    forecast_labels.append(last_time + h)
-                elif bucket_type == 'quarterly':
-                    forecast_labels.append(last_time + h)
-                else:
-                    forecast_labels.append(last_time + h)
+                # Generate forecast time label (same logic for all bucket types)
+                forecast_labels.append(last_time + h)
         
         # Compile results for this patient
         result = {
@@ -587,18 +577,28 @@ def infer_temporal_patient(model, temporal_data, vocab_mappings, modality_list,
     return results[0] if len(results) == 1 else results
 
 
+# Constants for trend classification thresholds
+# These values represent the minimum change in theta required to classify a trend
+# 0.05 represents a 5% change in topic probability, which is clinically significant
+TREND_THRESHOLD_INCREASING = 0.05
+TREND_THRESHOLD_DECREASING = -0.05
+
+
 def generate_temporal_explanation(patient_result, model=None, include_forecast=True):
     """
     Generate a structured explanation prompt with temporal information.
     
     Args:
         patient_result: dict from infer_temporal_patient
-        model: optional MixEHR_SAGE model for additional context
+        model: optional MixEHR_SAGE model for additional context (reserved for future use)
         include_forecast: whether to include forecast section
         
     Returns:
         str: formatted explanation prompt
     """
+    # Note: model parameter reserved for future extensibility (e.g., additional topic info)
+    _ = model  # Explicitly mark as intentionally unused
+    
     patient_id = patient_result['patient_id']
     theta_sequence = patient_result['theta_sequence']
     time_labels = patient_result['time_labels']
@@ -641,9 +641,9 @@ Based on MixEHR-SAGE analysis using φ_full = (1-π)×φ^r + π×φ^s:
                 first_val = theta_sequence[0][topic_idx] if topic_idx < len(theta_sequence[0]) else 0
                 last_val = theta_sequence[-1][topic_idx] if topic_idx < len(theta_sequence[-1]) else 0
                 change = last_val - first_val
-                if change > 0.05:
+                if change > TREND_THRESHOLD_INCREASING:
                     prompt += " ↑ INCREASING"
-                elif change < -0.05:
+                elif change < TREND_THRESHOLD_DECREASING:
                     prompt += " ↓ DECREASING"
                 else:
                     prompt += " → STABLE"
@@ -1199,8 +1199,12 @@ Input Data Format:
     
     # Validate that at least one data source is provided
     has_modality_files = args.icd or args.med or args.opcs
-    if not has_modality_files and not args.data:
-        print("Error: You must provide either --data for a single file or --icd/--med/--opcs for separate modality files.")
+    has_temporal_files = args.temporal_data or args.temporal_icd or args.temporal_med or args.temporal_opcs
+    if not has_modality_files and not args.data and not has_temporal_files:
+        print("Error: You must provide data via one of:")
+        print("  - --data for a single file")
+        print("  - --icd/--med/--opcs for separate modality files")
+        print("  - --temporal-data or --temporal-icd/--temporal-med/--temporal-opcs for temporal data")
         sys.exit(1)
     
     print(f"Loading model from {args.model_path}...")
@@ -1303,33 +1307,22 @@ Input Data Format:
                 print(f"Loading temporal OPCS data from {args.temporal_opcs}...")
                 temporal_modality_data['opcs'] = read_data_file(args.temporal_opcs)
         
+        # Determine which temporal data to use
+        input_data = temporal_df if temporal_df is not None else temporal_modality_data
+        
         # Run temporal inference
-        if temporal_df is not None:
-            temporal_results = infer_temporal_patient(
-                model=model,
-                temporal_data=temporal_df,
-                vocab_mappings=vocab_mappings,
-                modality_list=modality_list,
-                cutoff_date=args.cutoff_date,
-                bucket_type=args.bucket_type,
-                num_iterations=args.iterations,
-                method=args.method,
-                forecast_horizon=args.forecast_horizon,
-                forecast_smoothing=args.forecast_smoothing
-            )
-        else:
-            temporal_results = infer_temporal_patient(
-                model=model,
-                temporal_data=temporal_modality_data,
-                vocab_mappings=vocab_mappings,
-                modality_list=modality_list,
-                cutoff_date=args.cutoff_date,
-                bucket_type=args.bucket_type,
-                num_iterations=args.iterations,
-                method=args.method,
-                forecast_horizon=args.forecast_horizon,
-                forecast_smoothing=args.forecast_smoothing
-            )
+        temporal_results = infer_temporal_patient(
+            model=model,
+            temporal_data=input_data,
+            vocab_mappings=vocab_mappings,
+            modality_list=modality_list,
+            cutoff_date=args.cutoff_date,
+            bucket_type=args.bucket_type,
+            num_iterations=args.iterations,
+            method=args.method,
+            forecast_horizon=args.forecast_horizon,
+            forecast_smoothing=args.forecast_smoothing
+        )
         
         # Handle single patient or multiple patients
         if not isinstance(temporal_results, list):
