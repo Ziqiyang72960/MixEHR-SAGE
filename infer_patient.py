@@ -1567,6 +1567,10 @@ Input Data Format:
                     results_df.at[idx, col] = filtered_theta[i]
             
             # Also filter the theta sequences in temporal_results
+            # Load phecode definitions for proper topic naming
+            phecode_dict = load_phecode_definitions()
+            inv_phecode_ids = load_phecode_ids_mapping()
+            
             for result in temporal_results:
                 # Filter current theta
                 result['theta_current'] = apply_sex_filter_to_theta(
@@ -1592,10 +1596,22 @@ Input Data Format:
                         filtered_forecast.append(filtered_f)
                     result['forecast'] = filtered_forecast
                 
-                # Update top_topics with filtered theta
+                # Update top_topics with filtered theta and proper phecode names
                 filtered_current = result['theta_current']
                 top_indices = np.argsort(filtered_current)[::-1][:5]
-                result['top_topics'] = [(int(idx), float(filtered_current[idx]), f"topic_{idx}") for idx in top_indices]
+                updated_top_topics = []
+                for idx in top_indices:
+                    prob = float(filtered_current[idx])
+                    # Look up proper phecode name
+                    topic_name = f"Topic {idx}"
+                    if idx in inv_phecode_ids:
+                        phecode = inv_phecode_ids[idx]
+                        if phecode in phecode_dict:
+                            topic_name = f"{phecode} ({phecode_dict[phecode]})"
+                        else:
+                            topic_name = f"PheCode {phecode}"
+                    updated_top_topics.append((int(idx), prob, topic_name))
+                result['top_topics'] = updated_top_topics
             
             if args.patient_sex == 'male':
                 filtered_count = len(sex_specific_info.get('female_only_topics', set()))
